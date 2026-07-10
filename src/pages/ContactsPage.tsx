@@ -5,7 +5,7 @@ import {
   getFriends, getPendingRequests, searchUsers,
   sendFriendRequest, respondFriendRequest, checkFriendship,
   getOrCreatePrivateConversation, getOrCreateGroupConversation,
-  getMyGroups, createGroup, deleteFriendship, leaveGroup, deleteGroup
+  getMyGroups, createGroup, unfriendAndDeleteConversation, leaveGroup, deleteGroup
 } from '@/services/api';
 import type { Profile, Friendship, Group } from '@/types/types';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
@@ -117,7 +117,7 @@ export default function ContactsPage() {
   const handleConfirmDelete = async () => {
     if (!deleteTarget || !user) return;
     if (deleteTarget.type === 'friend') {
-      const { error } = await deleteFriendship(user.id, deleteTarget.id);
+      const { error } = await unfriendAndDeleteConversation(user.id, deleteTarget.id);
       if (error) { toast.error('删除失败：' + error.message); }
       else { toast.success(`已删除好友 ${deleteTarget.name}`); load(); }
     } else {

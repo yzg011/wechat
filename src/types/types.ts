@@ -12,6 +12,9 @@ export interface Profile {
   role: UserRole;
   email: string | null;
   last_seen_at: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  location_updated_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -100,6 +103,15 @@ export interface MomentComment {
   content: string;
   created_at: string;
   user?: Profile;
+}
+
+// ==================== 邀请链接 ====================
+export interface InviteLink {
+  id: string;
+  token: string;
+  created_by: string;
+  status: 'active' | 'revoked';
+  created_at: string;
 }
 
 export interface Message {

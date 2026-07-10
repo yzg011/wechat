@@ -5,21 +5,26 @@ import { supabase } from '@/db/supabase';
 import {
   getMessages, sendMessage, markMessagesRead, markConversationRead,
   getConversationDetails, getGroupMembers, addGroupMember, removeGroupMember,
-  uploadChatImage, getFriends, recallMessage, updateGroupAnnouncement, isOnline
+  uploadChatImage, getFriends, recallMessage, updateGroupAnnouncement, isOnline,
+  blockUser, clearConversationMessages, deleteMessage, hideMessageForMe,
+  getMyDeletedMessageIds, unfriendAndDeleteConversation,
+  checkFriendship, sendFriendRequest,
 } from '@/services/api';
 import type { Message, Conversation, GroupMember, Profile } from '@/types/types';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Progress } from '@/components/ui/progress';
 import { toast } from 'sonner';
 import {
   ArrowLeft, Send, Image as ImageIcon, Smile, Users, UserPlus,
-  Check, CheckCheck, RotateCcw, Megaphone, Pencil
+  Check, CheckCheck, RotateCcw, Megaphone, Pencil, MoreVertical,
+  Trash2, Ban, UserMinus, CheckSquare,
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
@@ -119,8 +124,15 @@ export default function ChatPage() {
   const [members, setMembers] = useState<GroupMember[]>([]);
   const [friends, setFriends] = useState<Profile[]>([]);
   const [addMemberOpen, setAddMemberOpen] = useState(false);
-  // 对方在线状态（私聊用）
   const [otherOnline, setOtherOnline] = useState(false);
+  // 私聊菜单确认弹窗
+  type ConfirmAction = 'clear' | 'block' | 'unfriend' | null;
+  const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
+  // 多选删除
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  // 陌生人提示横幅
+  const [showStrangerBanner, setShowStrangerBanner] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -138,13 +150,23 @@ export default function ChatPage() {
     }
     if (convData?.type === 'private' && convData.other_user) {
       setOtherOnline(isOnline((convData.other_user as any).last_seen_at));
+      // 判断是否为陌生人（非好友且非临时邀请账号）
+      const otherUsername: string = (convData.other_user as any).username ?? '';
+      const isGuest = otherUsername.startsWith('guest_');
+      if (!isGuest) {
+        const status = await checkFriendship(user.id, (convData.other_user as any).id);
+        setShowStrangerBanner(status === 'none');
+      }
     }
   }, [conversationId, user]);
 
   const loadMessages = useCallback(async () => {
     if (!conversationId || !user) return;
-    const msgs = await getMessages(conversationId, 50);
-    setMessages(msgs);
+    const [msgs, deletedIds] = await Promise.all([
+      getMessages(conversationId, 50),
+      getMyDeletedMessageIds(user.id, conversationId),
+    ]);
+    setMessages(deletedIds.size ? msgs.filter(m => !deletedIds.has(m.id)) : msgs);
     await markConversationRead(conversationId, user.id);
     await markMessagesRead(conversationId, user.id);
   }, [conversationId, user]);
@@ -225,6 +247,50 @@ export default function ChatPage() {
     e.target.value = '';
   };
 
+  // 私聊菜单操作
+  const handleConfirmAction = async () => {
+    if (!conversationId || !user) return;
+    const otherId = (conv?.other_user as any)?.id as string | undefined;
+
+    if (confirmAction === 'clear') {
+      const { error } = await clearConversationMessages(conversationId);
+      if (error) { toast.error('清除失败'); return; }
+      setMessages([]);
+      toast.success('聊天记录已清除');
+    } else if (confirmAction === 'block' && otherId) {
+      const { error } = await blockUser(user.id, otherId);
+      if (error) { toast.error('拉黑失败'); return; }
+      toast.success('已将对方拉黑');
+      navigate('/chat');
+    } else if (confirmAction === 'unfriend' && otherId) {
+      const { error } = await unfriendAndDeleteConversation(user.id, otherId, conversationId);
+      if (error) { toast.error('删除好友失败'); return; }
+      toast.success('已删除好友');
+      navigate('/chat');
+    }
+    setConfirmAction(null);
+  };
+
+  /** 陌生人横幅：加为好友 */
+  const handleAddFriend = async () => {
+    if (!user) return;
+    const otherId = (conv?.other_user as any)?.id as string;
+    const { error } = await sendFriendRequest(user.id, otherId);
+    if (error) { toast.error('发送失败：' + error.message); return; }
+    toast.success('好友请求已发送');
+    setShowStrangerBanner(false);
+  };
+
+  /** 陌生人横幅：拉黑 */
+  const handleBannerBlock = async () => {
+    if (!user) return;
+    const otherId = (conv?.other_user as any)?.id as string;
+    const { error } = await blockUser(user.id, otherId);
+    if (error) { toast.error('拉黑失败'); return; }
+    toast.success('已将对方拉黑');
+    navigate('/chat');
+  };
+
   const handleRecall = async (msg: Message) => {
     if (msg.sender_id !== user?.id) return;
     const age = new Date().getTime() - new Date(msg.created_at).getTime();
@@ -232,6 +298,66 @@ export default function ChatPage() {
     const { error } = await recallMessage(msg.id);
     if (error) toast.error('撤回失败：' + error.message);
     else setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, is_recalled: true, content: '[已撤回]' } : m));
+  };
+
+  const handleDeleteMessage = async (msg: Message) => {
+    if (!user) return;
+    // 先乐观删除，确保 UI 立即响应
+    setMessages(prev => prev.filter(m => m.id !== msg.id));
+    if (msg.id.startsWith('opt-')) return; // 乐观消息还未落库，无需处理
+
+    if (msg.sender_id === user.id) {
+      // 自己的消息：从 DB 删除（RLS: sender_id = uid()）
+      const { error } = await deleteMessage(msg.id);
+      if (error) {
+        toast.error('删除失败');
+        setMessages(prev => {
+          const idx = prev.findIndex(m => new Date(m.created_at) > new Date(msg.created_at));
+          const next = [...prev];
+          if (idx === -1) next.push(msg); else next.splice(idx, 0, msg);
+          return next;
+        });
+      }
+    } else {
+      // 他人消息：仅对自己隐藏，写入 message_deletions
+      const { error } = await hideMessageForMe(user.id, msg.id);
+      if (error) {
+        toast.error('删除失败');
+        setMessages(prev => {
+          const idx = prev.findIndex(m => new Date(m.created_at) > new Date(msg.created_at));
+          const next = [...prev];
+          if (idx === -1) next.push(msg); else next.splice(idx, 0, msg);
+          return next;
+        });
+      }
+    }
+  };
+
+  /** 批量删除已选中消息 */
+  const handleBatchDelete = async () => {
+    if (!user || selectedIds.size === 0) return;
+    const toDelete = messages.filter(m => selectedIds.has(m.id));
+    // 乐观删除
+    setMessages(prev => prev.filter(m => !selectedIds.has(m.id)));
+    setSelectMode(false);
+    setSelectedIds(new Set());
+
+    await Promise.all(toDelete.map(async msg => {
+      if (msg.id.startsWith('opt-')) return;
+      if (msg.sender_id === user.id) {
+        await deleteMessage(msg.id);
+      } else {
+        await hideMessageForMe(user.id, msg.id);
+      }
+    }));
+  };
+
+  const toggleSelect = (msgId: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(msgId)) next.delete(msgId); else next.add(msgId);
+      return next;
+    });
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -248,28 +374,74 @@ export default function ChatPage() {
     <div className="flex flex-col h-full bg-background">
       {/* 顶部栏 */}
       <div className="bg-card border-b border-border px-3 py-2 pl-14 md:pl-3 flex items-center gap-3 shrink-0">
-        <button onClick={() => navigate(-1)} className="md:hidden text-muted-foreground hover:text-foreground">
-          <ArrowLeft className="w-5 h-5" />
-        </button>
-        <div className="relative shrink-0">
-          <Avatar className="w-8 h-8">
-            <AvatarImage src={chatAvatar ?? ''} alt={chatName} />
-            <AvatarFallback className={`text-sm ${conv?.type === 'group' ? 'bg-accent text-accent-foreground' : 'bg-primary text-primary-foreground'}`}>
-              {chatName.charAt(0).toUpperCase()}
-            </AvatarFallback>
-          </Avatar>
-          {conv?.type === 'private' && <OnlineDot online={otherOnline} />}
-        </div>
-        <div className="flex-1 min-w-0">
-          <h2 className="font-medium text-sm truncate">{chatName}</h2>
-          {conv?.type === 'private' && (
-            <p className="text-xs text-muted-foreground">{otherOnline ? '在线' : '离线'}</p>
-          )}
-          {conv?.type === 'group' && <p className="text-xs text-muted-foreground">{members.length} 名成员</p>}
-        </div>
+        {selectMode ? (
+          <>
+            <button onClick={() => { setSelectMode(false); setSelectedIds(new Set()); }} className="text-muted-foreground hover:text-foreground">
+              <ArrowLeft className="w-5 h-5" />
+            </button>
+            <span className="flex-1 text-sm font-medium">已选 {selectedIds.size} 条</span>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-destructive hover:text-destructive gap-1"
+              disabled={selectedIds.size === 0}
+              onClick={handleBatchDelete}
+            >
+              <Trash2 className="w-4 h-4" />删除
+            </Button>
+          </>
+        ) : (
+          <>
+            <button onClick={() => navigate(-1)} className="md:hidden text-muted-foreground hover:text-foreground">
+              <ArrowLeft className="w-5 h-5" />
+            </button>
+            <div className="relative shrink-0">
+              <Avatar className="w-8 h-8">
+                <AvatarImage src={chatAvatar ?? ''} alt={chatName} />
+                <AvatarFallback className={`text-sm ${conv?.type === 'group' ? 'bg-accent text-accent-foreground' : 'bg-primary text-primary-foreground'}`}>
+                  {chatName.charAt(0).toUpperCase()}
+                </AvatarFallback>
+              </Avatar>
+              {conv?.type === 'private' && <OnlineDot online={otherOnline} />}
+            </div>
+            <div className="flex-1 min-w-0">
+              <h2 className="font-medium text-sm truncate">{chatName}</h2>
+              {conv?.type === 'private' && (
+                <p className="text-xs text-muted-foreground">{otherOnline ? '在线' : '离线'}</p>
+              )}
+              {conv?.type === 'group' && <p className="text-xs text-muted-foreground">{members.length} 名成员</p>}
+            </div>
 
-        {/* 群组管理面板 */}
-        {conv?.type === 'group' && (
+            {/* 多选按钮 */}
+            <Button variant="ghost" size="icon" className="w-8 h-8 shrink-0" onClick={() => setSelectMode(true)}>
+              <CheckSquare className="w-4 h-4" />
+            </Button>
+
+            {/* 私聊三点菜单 */}
+            {conv?.type === 'private' && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" size="icon" className="w-8 h-8 shrink-0">
+                    <MoreVertical className="w-4 h-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-40">
+                  <DropdownMenuItem onClick={() => setConfirmAction('clear')} className="gap-2 text-muted-foreground">
+                    <Trash2 className="w-4 h-4" />清除聊天记录
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={() => setConfirmAction('block')} className="gap-2 text-destructive focus:text-destructive">
+                    <Ban className="w-4 h-4" />拉黑
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => setConfirmAction('unfriend')} className="gap-2 text-destructive focus:text-destructive">
+                    <UserMinus className="w-4 h-4" />删除好友
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
+
+            {/* 群组管理面板 */}
+            {conv?.type === 'group' && (
           <Sheet>
             <SheetTrigger asChild>
               <Button variant="ghost" size="icon" className="w-8 h-8 shrink-0">
@@ -351,7 +523,34 @@ export default function ChatPage() {
             </SheetContent>
           </Sheet>
         )}
+          </>
+        )}
       </div>
+
+      {/* 陌生人提示横幅 */}
+      {showStrangerBanner && conv?.type === 'private' && (
+        <div className="bg-amber-50 dark:bg-amber-950/30 border-b border-amber-200 dark:border-amber-800 px-4 py-2.5 flex items-center gap-3 shrink-0">
+          <p className="flex-1 text-xs text-amber-800 dark:text-amber-300 min-w-0">
+            你们还不是好友，请注意隐私安全
+          </p>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="shrink-0 h-7 px-2 text-xs border border-amber-400 text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40"
+            onClick={handleAddFriend}
+          >
+            加好友
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="shrink-0 h-7 px-2 text-xs border border-destructive/50 text-destructive hover:bg-destructive/10"
+            onClick={handleBannerBlock}
+          >
+            拉黑
+          </Button>
+        </div>
+      )}
 
       {/* 群公告横幅 */}
       {conv?.type === 'group' && (conv.group as any)?.announcement && (
@@ -377,8 +576,18 @@ export default function ChatPage() {
                   {format(new Date(msg.created_at), 'MM月dd日 HH:mm', { locale: zhCN })}
                 </div>
               )}
-              <div className={`flex items-end gap-2 ${isMine ? 'flex-row-reverse' : 'flex-row'}`}>
-                {!isMine && (
+              {/* 多选模式：整行可点击选中 */}
+              <div
+                className={`flex items-end gap-2 ${isMine ? 'flex-row-reverse' : 'flex-row'} ${selectMode ? 'cursor-pointer' : ''} ${selectMode && selectedIds.has(msg.id) ? 'bg-primary/10 rounded-lg' : ''}`}
+                onClick={selectMode ? () => toggleSelect(msg.id) : undefined}
+              >
+                {/* 多选复选框 */}
+                {selectMode && (
+                  <div className={`shrink-0 mb-1 w-5 h-5 rounded-full border-2 flex items-center justify-center transition-colors ${selectedIds.has(msg.id) ? 'bg-primary border-primary' : 'border-muted-foreground'}`}>
+                    {selectedIds.has(msg.id) && <Check className="w-3 h-3 text-primary-foreground" />}
+                  </div>
+                )}
+                {!isMine && !selectMode && (
                   <div className="relative shrink-0 mb-1">
                     <Avatar className="w-8 h-8">
                       <AvatarImage src={(msg.sender as any)?.avatar_url ?? ''} />
@@ -389,6 +598,16 @@ export default function ChatPage() {
                     <OnlineDot online={isOnline((msg.sender as any)?.last_seen_at)} />
                   </div>
                 )}
+                {!isMine && selectMode && (
+                  <div className="relative shrink-0 mb-1">
+                    <Avatar className="w-8 h-8">
+                      <AvatarImage src={(msg.sender as any)?.avatar_url ?? ''} />
+                      <AvatarFallback className="bg-primary text-primary-foreground text-xs">
+                        {((msg.sender as any)?.nickname || '?').charAt(0)}
+                      </AvatarFallback>
+                    </Avatar>
+                  </div>
+                )}
                 <div className={`flex flex-col max-w-[70%] ${isMine ? 'items-end' : 'items-start'}`}>
                   {!isMine && conv?.type === 'group' && (
                     <span className="text-xs text-muted-foreground mb-1 ml-1">
@@ -397,6 +616,13 @@ export default function ChatPage() {
                   )}
                   {msg.is_recalled ? (
                     <div className="px-3 py-1.5 rounded-xl bg-muted text-muted-foreground text-xs italic">已撤回</div>
+                  ) : selectMode ? (
+                    /* 多选模式下气泡不触发 dropdown，直接展示 */
+                    <div className={`px-3 py-2 text-sm ${isMine ? 'bubble-right' : 'bubble-left'}`}>
+                      {msg.message_type === 'image'
+                        ? <img src={msg.image_url ?? ''} alt="图片" className="max-w-[200px] max-h-[200px] rounded-lg object-cover" />
+                        : <p className="whitespace-pre-wrap break-words">{msg.content}</p>}
+                    </div>
                   ) : (
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
@@ -406,16 +632,25 @@ export default function ChatPage() {
                             : <p className="whitespace-pre-wrap break-words">{msg.content}</p>}
                         </div>
                       </DropdownMenuTrigger>
-                      {canRecall && (
-                        <DropdownMenuContent align={isMine ? 'end' : 'start'}>
-                          <DropdownMenuItem onClick={() => handleRecall(msg)}>
-                            <RotateCcw className="w-4 h-4 mr-2" />撤回消息
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      )}
+                      <DropdownMenuContent align={isMine ? 'end' : 'start'}>
+                        {canRecall && (
+                          <>
+                            <DropdownMenuItem onClick={() => handleRecall(msg)}>
+                              <RotateCcw className="w-4 h-4 mr-2" />撤回消息
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                          </>
+                        )}
+                        <DropdownMenuItem
+                          onClick={() => handleDeleteMessage(msg)}
+                          className="text-destructive focus:text-destructive"
+                        >
+                          <Trash2 className="w-4 h-4 mr-2" />删除消息
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
                     </DropdownMenu>
                   )}
-                  {isMine && !msg.is_recalled && conv?.type === 'private' && (
+                  {isMine && !msg.is_recalled && conv?.type === 'private' && !selectMode && (
                     <span className="text-xs text-muted-foreground mt-0.5 flex items-center gap-0.5">
                       {msg.is_read ? <><CheckCheck className="w-3 h-3 text-primary" />已读</> : <><Check className="w-3 h-3" />未读</>}
                     </span>
@@ -466,6 +701,33 @@ export default function ChatPage() {
       </div>
 
       {/* 群公告编辑弹窗已内联到群组详情 Sheet 中 */}
+
+      {/* 私聊操作确认弹窗 */}
+      <AlertDialog open={confirmAction !== null} onOpenChange={o => { if (!o) setConfirmAction(null); }}>
+        <AlertDialogContent className="max-w-[calc(100%-2rem)] md:max-w-lg">
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {confirmAction === 'clear' && '清除聊天记录'}
+              {confirmAction === 'block' && '拉黑该用户'}
+              {confirmAction === 'unfriend' && '删除好友'}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {confirmAction === 'clear' && '此操作将永久删除本次对话的所有消息，无法恢复。'}
+              {confirmAction === 'block' && '拉黑后对方将无法向您发送消息，确定继续？'}
+              {confirmAction === 'unfriend' && '删除好友后需重新发送好友申请才能恢复，确定继续？'}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={handleConfirmAction}
+            >
+              确定
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

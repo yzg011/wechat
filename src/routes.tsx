@@ -4,6 +4,7 @@ import type { ReactNode } from 'react';
 
 const LoginPage = lazy(() => import('./pages/LoginPage'));
 const MainLayout = lazy(() => import('./components/layouts/MainLayout'));
+const InvitePage = lazy(() => import('./pages/InvitePage'));
 
 export interface RouteConfig {
   name: string;
@@ -23,5 +24,6 @@ const wrap = (el: ReactNode) => <Suspense fallback={<Loading />}>{el}</Suspense>
 
 export const routes: RouteConfig[] = [
   { name: '登录', path: '/login', element: wrap(<LoginPage />), public: true },
+  { name: '邀请加入', path: '/invite/:token', element: wrap(<InvitePage />), public: true },
   { name: '主界面', path: '/*', element: wrap(<MainLayout />), public: false },
 ];

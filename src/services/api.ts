@@ -106,6 +106,81 @@ export async function getOrCreateGroupConversation(groupId: string): Promise<str
   return data as string;
 }
 
+export async function deleteMessage(msgId: string): Promise<{ error: Error | null }> {
+  const { error } = await supabase
+    .from('messages')
+    .delete()
+    .eq('id', msgId);
+  return { error: error as Error | null };
+}
+
+/** 对他人消息"仅对我删除"：写入 message_deletions */
+export async function hideMessageForMe(userId: string, msgId: string): Promise<{ error: Error | null }> {
+  const { error } = await supabase
+    .from('message_deletions')
+    .insert({ user_id: userId, message_id: msgId });
+  return { error: error as Error | null };
+}
+
+/** 加载该用户已删除的消息 ID 集合 */
+export async function getMyDeletedMessageIds(userId: string, convId: string): Promise<Set<string>> {
+  // 通过 messages 表过滤出属于该会话的 deletion 记录
+  const { data } = await supabase
+    .from('message_deletions')
+    .select('message_id, messages!inner(conversation_id)')
+    .eq('user_id', userId)
+    .eq('messages.conversation_id', convId);
+  const ids = new Set<string>();
+  (data ?? []).forEach((row: any) => ids.add(row.message_id));
+  return ids;
+}
+
+/** 删除好友关系并同时清除两人之间的私聊会话（调用 SECURITY DEFINER RPC） */
+export async function unfriendAndDeleteConversation(
+  _myId: string, otherId: string, _conversationId?: string
+): Promise<{ error: Error | null }> {
+  const { error } = await supabase.rpc('unfriend_and_delete_conversation', { other_user_id: otherId });
+  return { error: error as Error | null };
+}
+
+export async function blockUser(blockerId: string, blockedId: string): Promise<{ error: Error | null }> {
+  const { error } = await supabase
+    .from('blocked_users')
+    .insert({ blocker_id: blockerId, blocked_id: blockedId });
+  return { error: error as Error | null };
+}
+
+export async function unblockUser(blockerId: string, blockedId: string): Promise<{ error: Error | null }> {
+  const { error } = await supabase
+    .from('blocked_users')
+    .delete()
+    .eq('blocker_id', blockerId)
+    .eq('blocked_id', blockedId);
+  return { error: error as Error | null };
+}
+
+export interface BlockedUserEntry {
+  id: string;
+  blocked_id: string;
+  created_at: string;
+  profile: { id: string; nickname: string; username: string; avatar_url: string | null };
+}
+
+export async function getBlockedUsers(myId: string): Promise<BlockedUserEntry[]> {
+  const { data, error } = await supabase
+    .from('blocked_users')
+    .select('id, blocked_id, created_at, profile:profiles!blocked_users_blocked_id_fkey(id, nickname, username, avatar_url)')
+    .eq('blocker_id', myId)
+    .order('created_at', { ascending: false });
+  if (error) { console.error('getBlockedUsers error', error); return []; }
+  return (data ?? []) as unknown as BlockedUserEntry[];
+}
+
+export async function clearConversationMessages(convId: string): Promise<{ error: Error | null }> {
+  const { error } = await supabase.rpc('clear_conversation_messages', { p_conv_id: convId });
+  return { error: error as Error | null };
+}
+
 export async function deleteFriendship(myId: string, otherId: string): Promise<{ error: Error | null }> {
   const { error } = await supabase
     .from('friendships')
@@ -222,11 +297,13 @@ export async function getConversationDetails(convId: string, userId: string): Pr
 }
 
 export async function markConversationRead(convId: string, userId: string): Promise<void> {
+  // UPSERT：若群聊成员尚无 conversation_participants 行则先创建再更新
   await supabase
     .from('conversation_participants')
-    .update({ last_read_at: new Date().toISOString() })
-    .eq('conversation_id', convId)
-    .eq('user_id', userId);
+    .upsert(
+      { conversation_id: convId, user_id: userId, last_read_at: new Date().toISOString() },
+      { onConflict: 'conversation_id,user_id' }
+    );
 }
 
 export async function getUnreadCount(convId: string, userId: string): Promise<number> {
@@ -403,4 +480,104 @@ export async function uploadChatImage(userId: string, file: File, onProgress?: (
   const { data: urlData } = supabase.storage.from('chat-images').getPublicUrl(data.path);
   onProgress?.(100);
   return { url: urlData.publicUrl, error: null };
+}
+
+// ==================== 邀请链接 ====================
+export async function createInviteLink(userId: string): Promise<{ data: import('@/types/types').InviteLink | null; error: Error | null }> {
+  const { data, error } = await supabase
+    .from('invite_links')
+    .insert({ created_by: userId })
+    .select()
+    .single();
+  if (error) return { data: null, error: error as Error };
+  return { data, error: null };
+}
+
+export async function getMyInviteLinks(userId: string): Promise<import('@/types/types').InviteLink[]> {
+  const { data } = await supabase
+    .from('invite_links')
+    .select('*')
+    .eq('created_by', userId)
+    .order('created_at', { ascending: false });
+  return (data ?? []) as import('@/types/types').InviteLink[];
+}
+
+export async function revokeInviteLink(id: string): Promise<{ error: Error | null }> {
+  const { error } = await supabase
+    .from('invite_links')
+    .update({ status: 'revoked' })
+    .eq('id', id);
+  return { error: error as Error | null };
+}
+
+export async function getInviteLinkByToken(token: string): Promise<import('@/types/types').InviteLink | null> {
+  const { data } = await supabase
+    .from('invite_links')
+    .select('*')
+    .eq('token', token)
+    .maybeSingle();
+  return data as import('@/types/types').InviteLink | null;
+}
+
+export async function joinViaInvite(token: string, nickname: string): Promise<{ conversationId: string | null; error: string | null }> {
+  const { data, error } = await supabase.rpc('join_via_invite', { p_token: token, p_nickname: nickname });
+  if (error) return { conversationId: null, error: error.message };
+  const result = data as { conversation_id?: string; error?: string; success?: boolean };
+  if (result.error) return { conversationId: null, error: result.error };
+  return { conversationId: result.conversation_id ?? null, error: null };
+}
+
+// ==================== 附近的人 ====================
+export async function updateUserLocation(userId: string, lat: number, lng: number): Promise<void> {
+  await supabase
+    .from('profiles')
+    .update({ latitude: lat, longitude: lng, location_updated_at: new Date().toISOString() })
+    .eq('id', userId);
+}
+
+export interface NearbyUser {
+  id: string;
+  username: string;
+  nickname: string;
+  avatar_url: string | null;
+  bio: string;
+  last_seen_at: string | null;
+  distance_km: number;
+}
+
+export async function findNearbyUsers(lat: number, lng: number, radiusKm = 5): Promise<NearbyUser[]> {
+  const { data, error } = await supabase.rpc('find_nearby_users', {
+    p_lat: lat,
+    p_lng: lng,
+    p_radius_km: radiusKm,
+    p_limit: 50,
+  });
+  if (error) { console.error('find_nearby_users error', error); return []; }
+  return (data ?? []) as NearbyUser[];
+}
+
+// ==================== 心有灵犀 ====================
+export interface TelepathyResult {
+  status: 'matched' | 'waiting' | 'error';
+  conversation_id?: string;
+  match_count?: number;
+  message?: string;
+}
+export interface TelepathyStatus {
+  keyword: string;
+  status: 'matched' | 'waiting';
+  conversation_id: string | null;
+  created_at: string;
+}
+
+export async function submitTelepathyKeyword(keyword: string): Promise<TelepathyResult> {
+  const { data, error } = await supabase.rpc('submit_telepathy_keyword', { p_keyword: keyword });
+  if (error) return { status: 'error', message: error.message };
+  return data as TelepathyResult;
+}
+
+export async function getMyTelepathyStatus(): Promise<TelepathyStatus | null> {
+  const { data, error } = await supabase.rpc('get_my_telepathy_status');
+  if (error || !data) return null;
+  return data as TelepathyStatus;
 }

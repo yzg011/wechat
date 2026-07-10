@@ -133,6 +133,124 @@ $$;
 
 
 --
+-- Name: clear_conversation_messages("uuid"); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE OR REPLACE FUNCTION "public"."clear_conversation_messages"("p_conv_id" "uuid") RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+BEGIN
+  -- 验证调用者是该会话的参与者
+  IF NOT EXISTS (
+    SELECT 1 FROM conversation_participants
+    WHERE conversation_id = p_conv_id AND user_id = auth.uid()
+  ) THEN
+    RAISE EXCEPTION 'not_participant';
+  END IF;
+
+  DELETE FROM messages WHERE conversation_id = p_conv_id;
+END;
+$$;
+
+
+--
+-- Name: delete_private_conversation_between("uuid"); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE OR REPLACE FUNCTION "public"."delete_private_conversation_between"("other_user_id" "uuid") RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+  v_my_id uuid := auth.uid();
+  v_conv_id uuid;
+BEGIN
+  SELECT cp1.conversation_id INTO v_conv_id
+  FROM conversation_participants cp1
+  JOIN conversation_participants cp2 ON cp1.conversation_id = cp2.conversation_id
+  JOIN conversations c ON c.id = cp1.conversation_id
+  WHERE cp1.user_id = v_my_id
+    AND cp2.user_id = other_user_id
+    AND c.type = 'private'
+  LIMIT 1;
+
+  IF v_conv_id IS NOT NULL THEN
+    DELETE FROM conversations WHERE id = v_conv_id;
+  END IF;
+END;
+$$;
+
+
+--
+-- Name: find_nearby_users(double precision, double precision, double precision, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE OR REPLACE FUNCTION "public"."find_nearby_users"("p_lat" double precision, "p_lng" double precision, "p_radius_km" double precision DEFAULT 5, "p_limit" integer DEFAULT 50) RETURNS TABLE("id" "uuid", "username" "text", "nickname" "text", "avatar_url" "text", "bio" "text", "last_seen_at" timestamp with time zone, "distance_km" double precision)
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    AS $$
+  SELECT
+    p.id,
+    p.username,
+    p.nickname,
+    p.avatar_url,
+    p.bio,
+    p.last_seen_at,
+    round((
+      6371 * acos(
+        cos(radians(p_lat)) * cos(radians(p.latitude))
+        * cos(radians(p.longitude) - radians(p_lng))
+        + sin(radians(p_lat)) * sin(radians(p.latitude))
+      )
+    )::numeric, 2)::double precision AS distance_km
+  FROM profiles p
+  JOIN auth.users u ON u.id = p.id
+  WHERE
+    p.id <> auth.uid()
+    AND p.latitude  IS NOT NULL
+    AND p.longitude IS NOT NULL
+    -- 排除临时邀请账号（邮箱以 @tmp.chat 结尾或用户名以 guest_ 开头）
+    AND u.email NOT LIKE '%@tmp.chat'
+    AND p.username NOT LIKE 'guest_%'
+    -- 粗略矩形过滤，避免全表扫描
+    AND p.latitude  BETWEEN p_lat - (p_radius_km / 111.0) AND p_lat + (p_radius_km / 111.0)
+    AND p.longitude BETWEEN p_lng - (p_radius_km / (111.0 * cos(radians(p_lat)))) AND p_lng + (p_radius_km / (111.0 * cos(radians(p_lat))))
+    AND (
+      6371 * acos(
+        GREATEST(-1, LEAST(1,
+          cos(radians(p_lat)) * cos(radians(p.latitude))
+          * cos(radians(p.longitude) - radians(p_lng))
+          + sin(radians(p_lat)) * sin(radians(p.latitude))
+        ))
+      )
+    ) <= p_radius_km
+  ORDER BY distance_km ASC
+  LIMIT p_limit;
+$$;
+
+
+--
+-- Name: get_my_telepathy_status(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE OR REPLACE FUNCTION "public"."get_my_telepathy_status"() RETURNS json
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    AS $$
+  SELECT COALESCE(
+    (SELECT json_build_object(
+      'keyword', keyword,
+      'status', CASE WHEN matched_at IS NOT NULL THEN 'matched' ELSE 'waiting' END,
+      'conversation_id', conversation_id,
+      'created_at', created_at
+    )
+    FROM telepathy_entries
+    WHERE user_id = auth.uid()
+      AND created_at >= now() - interval '24 hours'
+    ORDER BY created_at DESC LIMIT 1),
+    'null'::json
+  );
+$$;
+
+
+--
 -- Name: get_or_create_group_conversation("uuid"); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -271,9 +389,212 @@ CREATE OR REPLACE FUNCTION "public"."is_group_member"("gid" "uuid", "uid" "uuid"
 $$;
 
 
+--
+-- Name: join_via_invite("text", "text"); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE OR REPLACE FUNCTION "public"."join_via_invite"("p_token" "text", "p_nickname" "text") RETURNS json
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+  v_link invite_links%ROWTYPE;
+  v_user_id uuid := auth.uid();
+  v_conv_id uuid;
+BEGIN
+  -- 验证邀请链接有效
+  SELECT * INTO v_link FROM invite_links WHERE token = p_token AND status = 'active';
+  IF NOT FOUND THEN
+    RETURN json_build_object('error', 'invalid_or_revoked');
+  END IF;
+
+  -- 禁止自邀
+  IF v_user_id = v_link.created_by THEN
+    RETURN json_build_object('error', 'self_invite');
+  END IF;
+
+  -- 为访客创建/更新 profile
+  INSERT INTO profiles (id, username, nickname, role)
+  VALUES (
+    v_user_id,
+    'guest_' || left(replace(v_user_id::text, '-', ''), 8),
+    p_nickname,
+    'user'
+  )
+  ON CONFLICT (id) DO UPDATE SET
+    nickname = EXCLUDED.nickname,
+    updated_at = now();
+
+  -- 创建新的私聊会话（每位访客各自独立会话）
+  INSERT INTO conversations (type) VALUES ('private') RETURNING id INTO v_conv_id;
+
+  -- 把发起人和访客都加入会话
+  INSERT INTO conversation_participants (conversation_id, user_id)
+  VALUES (v_conv_id, v_link.created_by)
+  ON CONFLICT (conversation_id, user_id) DO NOTHING;
+
+  INSERT INTO conversation_participants (conversation_id, user_id)
+  VALUES (v_conv_id, v_user_id)
+  ON CONFLICT (conversation_id, user_id) DO NOTHING;
+
+  RETURN json_build_object('conversation_id', v_conv_id, 'success', true);
+END;
+$$;
+
+
+--
+-- Name: submit_telepathy_keyword("text"); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE OR REPLACE FUNCTION "public"."submit_telepathy_keyword"("p_keyword" "text") RETURNS json
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+  v_my_id     uuid   := auth.uid();
+  v_keyword   text   := lower(trim(p_keyword));
+  v_since     timestamptz := now() - interval '24 hours';
+  v_partners  uuid[];
+  v_all_users uuid[];
+  v_conv_id   uuid;
+  v_group_id  uuid;
+BEGIN
+  -- 校验
+  IF length(v_keyword) < 1 OR length(v_keyword) > 30 THEN
+    RETURN json_build_object('status','error','message','词语长度须在1-30字之间');
+  END IF;
+
+  -- 防止24小时内重复提交同一词语
+  IF EXISTS (
+    SELECT 1 FROM telepathy_entries
+    WHERE user_id = v_my_id AND keyword = v_keyword
+      AND created_at >= v_since AND matched_at IS NULL
+  ) THEN
+    RETURN json_build_object('status','waiting','message','已在等待配对中');
+  END IF;
+
+  -- 插入词条
+  INSERT INTO telepathy_entries(user_id, keyword) VALUES(v_my_id, v_keyword);
+
+  -- 查找24小时内输入相同词语的其他未配对用户
+  SELECT ARRAY_AGG(user_id) INTO v_partners
+  FROM telepathy_entries
+  WHERE keyword = v_keyword
+    AND created_at >= v_since
+    AND matched_at IS NULL
+    AND user_id <> v_my_id;
+
+  -- 无其他人 → 等待
+  IF v_partners IS NULL OR array_length(v_partners, 1) = 0 THEN
+    RETURN json_build_object('status','waiting','message','词语已记录，等待配对中…');
+  END IF;
+
+  -- 组合所有人（含自己）
+  v_all_users := v_partners || ARRAY[v_my_id];
+
+  IF array_length(v_all_users, 1) = 2 THEN
+    -- 2人 → 私聊
+    SELECT cp1.conversation_id INTO v_conv_id
+    FROM conversation_participants cp1
+    JOIN conversation_participants cp2 ON cp1.conversation_id = cp2.conversation_id
+    JOIN conversations c ON c.id = cp1.conversation_id
+    WHERE cp1.user_id = v_all_users[1] AND cp2.user_id = v_all_users[2] AND c.type = 'private'
+    LIMIT 1;
+
+    IF v_conv_id IS NULL THEN
+      INSERT INTO conversations(type) VALUES('private') RETURNING id INTO v_conv_id;
+      INSERT INTO conversation_participants(conversation_id, user_id)
+        VALUES(v_conv_id, v_all_users[1]), (v_conv_id, v_all_users[2]);
+    END IF;
+  ELSE
+    -- 3人及以上 → 群聊
+    INSERT INTO groups(name, owner_id)
+      VALUES('心有灵犀·' || v_keyword, v_my_id)
+      RETURNING id INTO v_group_id;
+    INSERT INTO conversations(type, group_id) VALUES('group', v_group_id) RETURNING id INTO v_conv_id;
+    INSERT INTO group_members(group_id, user_id)
+      SELECT v_group_id, unnest(v_all_users);
+    INSERT INTO conversation_participants(conversation_id, user_id)
+      SELECT v_conv_id, unnest(v_all_users);
+  END IF;
+
+  -- 标记所有词条已配对
+  UPDATE telepathy_entries
+  SET matched_at = now(), conversation_id = v_conv_id
+  WHERE keyword = v_keyword
+    AND created_at >= v_since
+    AND matched_at IS NULL
+    AND user_id = ANY(v_all_users);
+
+  RETURN json_build_object(
+    'status','matched',
+    'conversation_id', v_conv_id,
+    'match_count', array_length(v_all_users, 1)
+  );
+END;
+$$;
+
+
+--
+-- Name: sync_group_member_to_participant(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE OR REPLACE FUNCTION "public"."sync_group_member_to_participant"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+  v_conv_id uuid;
+BEGIN
+  SELECT id INTO v_conv_id
+  FROM conversations
+  WHERE type = 'group' AND group_id = NEW.group_id
+  LIMIT 1;
+
+  IF v_conv_id IS NOT NULL THEN
+    INSERT INTO conversation_participants (conversation_id, user_id)
+    VALUES (v_conv_id, NEW.user_id)
+    ON CONFLICT (conversation_id, user_id) DO NOTHING;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: unfriend_and_delete_conversation("uuid"); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE OR REPLACE FUNCTION "public"."unfriend_and_delete_conversation"("other_user_id" "uuid") RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+  v_my_id uuid := auth.uid();
+BEGIN
+  -- 删除好友关系（双向）
+  DELETE FROM friendships
+  WHERE (requester_id = v_my_id AND addressee_id = other_user_id)
+     OR (requester_id = other_user_id AND addressee_id = v_my_id);
+
+  -- 删除私聊会话（CASCADE 处理 messages + participants）
+  PERFORM delete_private_conversation_between(other_user_id);
+END;
+$$;
+
+
 SET default_tablespace = '';
 
 SET default_table_access_method = "heap";
+
+--
+-- Name: blocked_users; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE IF NOT EXISTS "public"."blocked_users" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "blocker_id" "uuid" NOT NULL,
+    "blocked_id" "uuid" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
 
 --
 -- Name: conversation_participants; Type: TABLE; Schema: public; Owner: -
@@ -340,6 +661,32 @@ CREATE TABLE IF NOT EXISTS "public"."groups" (
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "announcement" "text" DEFAULT ''::"text"
+);
+
+
+--
+-- Name: invite_links; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE IF NOT EXISTS "public"."invite_links" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "token" "text" DEFAULT "encode"("extensions"."gen_random_bytes"(16), 'hex'::"text") NOT NULL,
+    "created_by" "uuid" NOT NULL,
+    "status" "text" DEFAULT 'active'::"text" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "invite_links_status_check" CHECK (("status" = ANY (ARRAY['active'::"text", 'revoked'::"text"])))
+);
+
+
+--
+-- Name: message_deletions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE IF NOT EXISTS "public"."message_deletions" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "user_id" "uuid" NOT NULL,
+    "message_id" "uuid" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL
 );
 
 
@@ -415,8 +762,71 @@ CREATE TABLE IF NOT EXISTS "public"."profiles" (
     "email" "text",
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "last_seen_at" timestamp with time zone DEFAULT "now"()
+    "last_seen_at" timestamp with time zone DEFAULT "now"(),
+    "latitude" double precision,
+    "longitude" double precision,
+    "location_updated_at" timestamp with time zone
 );
+
+
+--
+-- Name: telepathy_entries; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE IF NOT EXISTS "public"."telepathy_entries" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "user_id" "uuid" NOT NULL,
+    "keyword" "text" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "matched_at" timestamp with time zone,
+    "conversation_id" "uuid"
+);
+
+
+--
+-- Name: blocked_users blocked_users_blocker_id_blocked_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $pg_schema_restore$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint con
+    JOIN pg_class c ON c.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE con.conname = 'blocked_users_blocker_id_blocked_id_key'
+      AND n.nspname = 'public'
+      AND c.relname = 'blocked_users'
+  ) THEN
+    EXECUTE $pg_schema_sql$
+ALTER TABLE ONLY "public"."blocked_users"
+    ADD CONSTRAINT "blocked_users_blocker_id_blocked_id_key" UNIQUE ("blocker_id", "blocked_id");
+$pg_schema_sql$;
+  END IF;
+END
+$pg_schema_restore$;
+
+
+--
+-- Name: blocked_users blocked_users_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $pg_schema_restore$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint con
+    JOIN pg_class c ON c.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE con.conname = 'blocked_users_pkey'
+      AND n.nspname = 'public'
+      AND c.relname = 'blocked_users'
+  ) THEN
+    EXECUTE $pg_schema_sql$
+ALTER TABLE ONLY "public"."blocked_users"
+    ADD CONSTRAINT "blocked_users_pkey" PRIMARY KEY ("id");
+$pg_schema_sql$;
+  END IF;
+END
+$pg_schema_restore$;
 
 
 --
@@ -604,6 +1014,98 @@ $pg_schema_restore$;
 
 
 --
+-- Name: invite_links invite_links_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $pg_schema_restore$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint con
+    JOIN pg_class c ON c.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE con.conname = 'invite_links_pkey'
+      AND n.nspname = 'public'
+      AND c.relname = 'invite_links'
+  ) THEN
+    EXECUTE $pg_schema_sql$
+ALTER TABLE ONLY "public"."invite_links"
+    ADD CONSTRAINT "invite_links_pkey" PRIMARY KEY ("id");
+$pg_schema_sql$;
+  END IF;
+END
+$pg_schema_restore$;
+
+
+--
+-- Name: invite_links invite_links_token_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $pg_schema_restore$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint con
+    JOIN pg_class c ON c.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE con.conname = 'invite_links_token_key'
+      AND n.nspname = 'public'
+      AND c.relname = 'invite_links'
+  ) THEN
+    EXECUTE $pg_schema_sql$
+ALTER TABLE ONLY "public"."invite_links"
+    ADD CONSTRAINT "invite_links_token_key" UNIQUE ("token");
+$pg_schema_sql$;
+  END IF;
+END
+$pg_schema_restore$;
+
+
+--
+-- Name: message_deletions message_deletions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $pg_schema_restore$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint con
+    JOIN pg_class c ON c.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE con.conname = 'message_deletions_pkey'
+      AND n.nspname = 'public'
+      AND c.relname = 'message_deletions'
+  ) THEN
+    EXECUTE $pg_schema_sql$
+ALTER TABLE ONLY "public"."message_deletions"
+    ADD CONSTRAINT "message_deletions_pkey" PRIMARY KEY ("id");
+$pg_schema_sql$;
+  END IF;
+END
+$pg_schema_restore$;
+
+
+--
+-- Name: message_deletions message_deletions_user_id_message_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $pg_schema_restore$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint con
+    JOIN pg_class c ON c.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE con.conname = 'message_deletions_user_id_message_id_key'
+      AND n.nspname = 'public'
+      AND c.relname = 'message_deletions'
+  ) THEN
+    EXECUTE $pg_schema_sql$
+ALTER TABLE ONLY "public"."message_deletions"
+    ADD CONSTRAINT "message_deletions_user_id_message_id_key" UNIQUE ("user_id", "message_id");
+$pg_schema_sql$;
+  END IF;
+END
+$pg_schema_restore$;
+
+
+--
 -- Name: messages messages_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -765,6 +1267,29 @@ $pg_schema_restore$;
 
 
 --
+-- Name: telepathy_entries telepathy_entries_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $pg_schema_restore$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint con
+    JOIN pg_class c ON c.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE con.conname = 'telepathy_entries_pkey'
+      AND n.nspname = 'public'
+      AND c.relname = 'telepathy_entries'
+  ) THEN
+    EXECUTE $pg_schema_sql$
+ALTER TABLE ONLY "public"."telepathy_entries"
+    ADD CONSTRAINT "telepathy_entries_pkey" PRIMARY KEY ("id");
+$pg_schema_sql$;
+  END IF;
+END
+$pg_schema_restore$;
+
+
+--
 -- Name: idx_conversation_participants_user; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -804,6 +1329,73 @@ CREATE INDEX IF NOT EXISTS "idx_group_members_user" ON "public"."group_members" 
 --
 
 CREATE INDEX IF NOT EXISTS "idx_messages_conversation_id" ON "public"."messages" USING "btree" ("conversation_id", "created_at" DESC);
+
+
+--
+-- Name: idx_telepathy_keyword; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX IF NOT EXISTS "idx_telepathy_keyword" ON "public"."telepathy_entries" USING "btree" ("keyword", "created_at" DESC);
+
+
+--
+-- Name: idx_telepathy_user; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX IF NOT EXISTS "idx_telepathy_user" ON "public"."telepathy_entries" USING "btree" ("user_id", "created_at" DESC);
+
+
+--
+-- Name: group_members trg_sync_group_member_to_participant; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER "trg_sync_group_member_to_participant" AFTER INSERT ON "public"."group_members" FOR EACH ROW EXECUTE FUNCTION "public"."sync_group_member_to_participant"();
+
+
+--
+-- Name: blocked_users blocked_users_blocked_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $pg_schema_restore$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint con
+    JOIN pg_class c ON c.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE con.conname = 'blocked_users_blocked_id_fkey'
+      AND n.nspname = 'public'
+      AND c.relname = 'blocked_users'
+  ) THEN
+    EXECUTE $pg_schema_sql$
+ALTER TABLE ONLY "public"."blocked_users"
+    ADD CONSTRAINT "blocked_users_blocked_id_fkey" FOREIGN KEY ("blocked_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
+$pg_schema_sql$;
+  END IF;
+END
+$pg_schema_restore$;
+
+
+--
+-- Name: blocked_users blocked_users_blocker_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $pg_schema_restore$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint con
+    JOIN pg_class c ON c.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE con.conname = 'blocked_users_blocker_id_fkey'
+      AND n.nspname = 'public'
+      AND c.relname = 'blocked_users'
+  ) THEN
+    EXECUTE $pg_schema_sql$
+ALTER TABLE ONLY "public"."blocked_users"
+    ADD CONSTRAINT "blocked_users_blocker_id_fkey" FOREIGN KEY ("blocker_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
+$pg_schema_sql$;
+  END IF;
+END
+$pg_schema_restore$;
 
 
 --
@@ -984,6 +1576,75 @@ BEGIN
     EXECUTE $pg_schema_sql$
 ALTER TABLE ONLY "public"."groups"
     ADD CONSTRAINT "groups_owner_id_fkey" FOREIGN KEY ("owner_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
+$pg_schema_sql$;
+  END IF;
+END
+$pg_schema_restore$;
+
+
+--
+-- Name: invite_links invite_links_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $pg_schema_restore$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint con
+    JOIN pg_class c ON c.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE con.conname = 'invite_links_created_by_fkey'
+      AND n.nspname = 'public'
+      AND c.relname = 'invite_links'
+  ) THEN
+    EXECUTE $pg_schema_sql$
+ALTER TABLE ONLY "public"."invite_links"
+    ADD CONSTRAINT "invite_links_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
+$pg_schema_sql$;
+  END IF;
+END
+$pg_schema_restore$;
+
+
+--
+-- Name: message_deletions message_deletions_message_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $pg_schema_restore$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint con
+    JOIN pg_class c ON c.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE con.conname = 'message_deletions_message_id_fkey'
+      AND n.nspname = 'public'
+      AND c.relname = 'message_deletions'
+  ) THEN
+    EXECUTE $pg_schema_sql$
+ALTER TABLE ONLY "public"."message_deletions"
+    ADD CONSTRAINT "message_deletions_message_id_fkey" FOREIGN KEY ("message_id") REFERENCES "public"."messages"("id") ON DELETE CASCADE;
+$pg_schema_sql$;
+  END IF;
+END
+$pg_schema_restore$;
+
+
+--
+-- Name: message_deletions message_deletions_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $pg_schema_restore$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint con
+    JOIN pg_class c ON c.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE con.conname = 'message_deletions_user_id_fkey'
+      AND n.nspname = 'public'
+      AND c.relname = 'message_deletions'
+  ) THEN
+    EXECUTE $pg_schema_sql$
+ALTER TABLE ONLY "public"."message_deletions"
+    ADD CONSTRAINT "message_deletions_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
 $pg_schema_sql$;
   END IF;
 END
@@ -1175,6 +1836,52 @@ $pg_schema_restore$;
 
 
 --
+-- Name: telepathy_entries telepathy_entries_conversation_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $pg_schema_restore$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint con
+    JOIN pg_class c ON c.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE con.conname = 'telepathy_entries_conversation_id_fkey'
+      AND n.nspname = 'public'
+      AND c.relname = 'telepathy_entries'
+  ) THEN
+    EXECUTE $pg_schema_sql$
+ALTER TABLE ONLY "public"."telepathy_entries"
+    ADD CONSTRAINT "telepathy_entries_conversation_id_fkey" FOREIGN KEY ("conversation_id") REFERENCES "public"."conversations"("id") ON DELETE SET NULL;
+$pg_schema_sql$;
+  END IF;
+END
+$pg_schema_restore$;
+
+
+--
+-- Name: telepathy_entries telepathy_entries_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $pg_schema_restore$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint con
+    JOIN pg_class c ON c.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE con.conname = 'telepathy_entries_user_id_fkey'
+      AND n.nspname = 'public'
+      AND c.relname = 'telepathy_entries'
+  ) THEN
+    EXECUTE $pg_schema_sql$
+ALTER TABLE ONLY "public"."telepathy_entries"
+    ADD CONSTRAINT "telepathy_entries_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
+$pg_schema_sql$;
+  END IF;
+END
+$pg_schema_restore$;
+
+
+--
 -- Name: profiles admins_full_profiles; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -1190,6 +1897,28 @@ BEGIN
   ) THEN
     EXECUTE $pg_schema_sql$
 CREATE POLICY "admins_full_profiles" ON "public"."profiles" TO "authenticated" USING (("public"."get_user_role"("auth"."uid"()) = 'admin'::"public"."user_role"));
+$pg_schema_sql$;
+  END IF;
+END
+$pg_schema_restore$;
+
+
+--
+-- Name: invite_links anyone_view_invite_links; Type: POLICY; Schema: public; Owner: -
+--
+
+DO $pg_schema_restore$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policy pol
+    JOIN pg_class c ON c.oid = pol.polrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE pol.polname = 'anyone_view_invite_links'
+      AND n.nspname = 'public'
+      AND c.relname = 'invite_links'
+  ) THEN
+    EXECUTE $pg_schema_sql$
+CREATE POLICY "anyone_view_invite_links" ON "public"."invite_links" FOR SELECT USING (true);
 $pg_schema_sql$;
   END IF;
 END
@@ -1239,6 +1968,12 @@ $pg_schema_sql$;
 END
 $pg_schema_restore$;
 
+
+--
+-- Name: blocked_users; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE "public"."blocked_users" ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: moment_comments comments_delete; Type: POLICY; Schema: public; Owner: -
@@ -1319,6 +2054,94 @@ ALTER TABLE "public"."conversation_participants" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."conversations" ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: invite_links creator_delete_invite_links; Type: POLICY; Schema: public; Owner: -
+--
+
+DO $pg_schema_restore$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policy pol
+    JOIN pg_class c ON c.oid = pol.polrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE pol.polname = 'creator_delete_invite_links'
+      AND n.nspname = 'public'
+      AND c.relname = 'invite_links'
+  ) THEN
+    EXECUTE $pg_schema_sql$
+CREATE POLICY "creator_delete_invite_links" ON "public"."invite_links" FOR DELETE USING (("auth"."uid"() = "created_by"));
+$pg_schema_sql$;
+  END IF;
+END
+$pg_schema_restore$;
+
+
+--
+-- Name: invite_links creator_insert_invite_links; Type: POLICY; Schema: public; Owner: -
+--
+
+DO $pg_schema_restore$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policy pol
+    JOIN pg_class c ON c.oid = pol.polrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE pol.polname = 'creator_insert_invite_links'
+      AND n.nspname = 'public'
+      AND c.relname = 'invite_links'
+  ) THEN
+    EXECUTE $pg_schema_sql$
+CREATE POLICY "creator_insert_invite_links" ON "public"."invite_links" FOR INSERT WITH CHECK (("auth"."uid"() = "created_by"));
+$pg_schema_sql$;
+  END IF;
+END
+$pg_schema_restore$;
+
+
+--
+-- Name: invite_links creator_update_invite_links; Type: POLICY; Schema: public; Owner: -
+--
+
+DO $pg_schema_restore$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policy pol
+    JOIN pg_class c ON c.oid = pol.polrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE pol.polname = 'creator_update_invite_links'
+      AND n.nspname = 'public'
+      AND c.relname = 'invite_links'
+  ) THEN
+    EXECUTE $pg_schema_sql$
+CREATE POLICY "creator_update_invite_links" ON "public"."invite_links" FOR UPDATE USING (("auth"."uid"() = "created_by"));
+$pg_schema_sql$;
+  END IF;
+END
+$pg_schema_restore$;
+
+
+--
+-- Name: blocked_users delete_own_blocks; Type: POLICY; Schema: public; Owner: -
+--
+
+DO $pg_schema_restore$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policy pol
+    JOIN pg_class c ON c.oid = pol.polrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE pol.polname = 'delete_own_blocks'
+      AND n.nspname = 'public'
+      AND c.relname = 'blocked_users'
+  ) THEN
+    EXECUTE $pg_schema_sql$
+CREATE POLICY "delete_own_blocks" ON "public"."blocked_users" FOR DELETE USING (("auth"."uid"() = "blocker_id"));
+$pg_schema_sql$;
+  END IF;
+END
+$pg_schema_restore$;
+
+
+--
 -- Name: friendships; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -1379,6 +2202,34 @@ $pg_schema_sql$;
 END
 $pg_schema_restore$;
 
+
+--
+-- Name: blocked_users insert_own_blocks; Type: POLICY; Schema: public; Owner: -
+--
+
+DO $pg_schema_restore$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policy pol
+    JOIN pg_class c ON c.oid = pol.polrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE pol.polname = 'insert_own_blocks'
+      AND n.nspname = 'public'
+      AND c.relname = 'blocked_users'
+  ) THEN
+    EXECUTE $pg_schema_sql$
+CREATE POLICY "insert_own_blocks" ON "public"."blocked_users" FOR INSERT WITH CHECK (("auth"."uid"() = "blocker_id"));
+$pg_schema_sql$;
+  END IF;
+END
+$pg_schema_restore$;
+
+
+--
+-- Name: invite_links; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE "public"."invite_links" ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: moment_likes likes_delete; Type: POLICY; Schema: public; Owner: -
@@ -1467,6 +2318,12 @@ $pg_schema_sql$;
 END
 $pg_schema_restore$;
 
+
+--
+-- Name: message_deletions; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE "public"."message_deletions" ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: messages; Type: ROW SECURITY; Schema: public; Owner: -
@@ -1629,6 +2486,28 @@ $pg_schema_restore$;
 
 
 --
+-- Name: message_deletions owner_manage_deletions; Type: POLICY; Schema: public; Owner: -
+--
+
+DO $pg_schema_restore$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policy pol
+    JOIN pg_class c ON c.oid = pol.polrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE pol.polname = 'owner_manage_deletions'
+      AND n.nspname = 'public'
+      AND c.relname = 'message_deletions'
+  ) THEN
+    EXECUTE $pg_schema_sql$
+CREATE POLICY "owner_manage_deletions" ON "public"."message_deletions" USING (("auth"."uid"() = "user_id")) WITH CHECK (("auth"."uid"() = "user_id"));
+$pg_schema_sql$;
+  END IF;
+END
+$pg_schema_restore$;
+
+
+--
 -- Name: groups owner_update_groups; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -1745,6 +2624,28 @@ $pg_schema_restore$;
 ALTER TABLE "public"."profiles" ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: messages sender_delete_messages; Type: POLICY; Schema: public; Owner: -
+--
+
+DO $pg_schema_restore$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policy pol
+    JOIN pg_class c ON c.oid = pol.polrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE pol.polname = 'sender_delete_messages'
+      AND n.nspname = 'public'
+      AND c.relname = 'messages'
+  ) THEN
+    EXECUTE $pg_schema_sql$
+CREATE POLICY "sender_delete_messages" ON "public"."messages" FOR DELETE USING (("auth"."uid"() = "sender_id"));
+$pg_schema_sql$;
+  END IF;
+END
+$pg_schema_restore$;
+
+
+--
 -- Name: messages sender_recall_messages; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -1787,6 +2688,12 @@ $pg_schema_sql$;
 END
 $pg_schema_restore$;
 
+
+--
+-- Name: telepathy_entries; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE "public"."telepathy_entries" ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: conversation_participants update_own_last_read; Type: POLICY; Schema: public; Owner: -
@@ -1987,6 +2894,28 @@ $pg_schema_restore$;
 
 
 --
+-- Name: blocked_users view_own_blocks; Type: POLICY; Schema: public; Owner: -
+--
+
+DO $pg_schema_restore$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policy pol
+    JOIN pg_class c ON c.oid = pol.polrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE pol.polname = 'view_own_blocks'
+      AND n.nspname = 'public'
+      AND c.relname = 'blocked_users'
+  ) THEN
+    EXECUTE $pg_schema_sql$
+CREATE POLICY "view_own_blocks" ON "public"."blocked_users" FOR SELECT USING (("auth"."uid"() = "blocker_id"));
+$pg_schema_sql$;
+  END IF;
+END
+$pg_schema_restore$;
+
+
+--
 -- Name: conversation_participants view_own_conversation_participants; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -2002,6 +2931,50 @@ BEGIN
   ) THEN
     EXECUTE $pg_schema_sql$
 CREATE POLICY "view_own_conversation_participants" ON "public"."conversation_participants" FOR SELECT TO "authenticated" USING ("public"."is_conversation_participant"("conversation_id", "auth"."uid"()));
+$pg_schema_sql$;
+  END IF;
+END
+$pg_schema_restore$;
+
+
+--
+-- Name: telepathy_entries 用户可插入自己的词条; Type: POLICY; Schema: public; Owner: -
+--
+
+DO $pg_schema_restore$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policy pol
+    JOIN pg_class c ON c.oid = pol.polrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE pol.polname = '用户可插入自己的词条'
+      AND n.nspname = 'public'
+      AND c.relname = 'telepathy_entries'
+  ) THEN
+    EXECUTE $pg_schema_sql$
+CREATE POLICY "用户可插入自己的词条" ON "public"."telepathy_entries" FOR INSERT WITH CHECK (("auth"."uid"() = "user_id"));
+$pg_schema_sql$;
+  END IF;
+END
+$pg_schema_restore$;
+
+
+--
+-- Name: telepathy_entries 用户可读自己的词条; Type: POLICY; Schema: public; Owner: -
+--
+
+DO $pg_schema_restore$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policy pol
+    JOIN pg_class c ON c.oid = pol.polrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE pol.polname = '用户可读自己的词条'
+      AND n.nspname = 'public'
+      AND c.relname = 'telepathy_entries'
+  ) THEN
+    EXECUTE $pg_schema_sql$
+CREATE POLICY "用户可读自己的词条" ON "public"."telepathy_entries" FOR SELECT USING (("auth"."uid"() = "user_id"));
 $pg_schema_sql$;
   END IF;
 END

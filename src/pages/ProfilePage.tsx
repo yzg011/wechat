@@ -1,15 +1,18 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
-import { updateProfile, uploadAvatar } from '@/services/api';
+import { updateProfile, uploadAvatar, getBlockedUsers, unblockUser } from '@/services/api';
+import type { BlockedUserEntry } from '@/services/api';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Progress } from '@/components/ui/progress';
+import { Skeleton } from '@/components/ui/skeleton';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { toast } from 'sonner';
-import { Camera, Save, LogOut, KeyRound, Eye, EyeOff } from 'lucide-react';
+import { Camera, Save, LogOut, KeyRound, Eye, EyeOff, ShieldOff, Ban } from 'lucide-react';
 import { supabase } from '@/db/supabase';
 
 export default function ProfilePage() {
@@ -29,6 +32,20 @@ export default function ProfilePage() {
   const [showNew, setShowNew] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
   const [changingPwd, setChangingPwd] = useState(false);
+
+  // 黑名单弹窗状态
+  const [blacklistOpen, setBlacklistOpen] = useState(false);
+  const [blockedList, setBlockedList] = useState<BlockedUserEntry[]>([]);
+  const [blacklistLoading, setBlacklistLoading] = useState(false);
+  const [unblockTarget, setUnblockTarget] = useState<BlockedUserEntry | null>(null);
+
+  const loadBlockedList = useCallback(async () => {
+    if (!user) return;
+    setBlacklistLoading(true);
+    const list = await getBlockedUsers(user.id);
+    setBlockedList(list);
+    setBlacklistLoading(false);
+  }, [user]);
 
   useEffect(() => {
     if (profile) {
@@ -69,6 +86,15 @@ export default function ProfilePage() {
   const handleSignOut = async () => {
     await signOut();
     toast.success('已退出登录');
+  };
+
+  const handleUnblock = async () => {
+    if (!user || !unblockTarget) return;
+    const { error } = await unblockUser(user.id, unblockTarget.blocked_id);
+    if (error) { toast.error('解除拉黑失败'); return; }
+    toast.success(`已解除对 ${unblockTarget.profile.nickname} 的拉黑`);
+    setUnblockTarget(null);
+    setBlockedList(prev => prev.filter(b => b.id !== unblockTarget.id));
   };
 
   const handleChangePassword = async () => {
@@ -266,8 +292,83 @@ export default function ProfilePage() {
             <LogOut className="w-4 h-4" />
             退出登录
           </Button>
+
+          {/* 黑名单管理 */}
+          <Dialog open={blacklistOpen} onOpenChange={o => { setBlacklistOpen(o); if (o) loadBlockedList(); }}>
+            <DialogTrigger asChild>
+              <Button variant="secondary" className="w-full h-11 gap-2">
+                <Ban className="w-4 h-4" />
+                黑名单管理
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="max-w-[calc(100%-2rem)] md:max-w-sm">
+              <DialogHeader><DialogTitle>黑名单</DialogTitle></DialogHeader>
+              <div className="mt-2 min-h-[120px]">
+                {blacklistLoading ? (
+                  <div className="space-y-3">
+                    {[...Array(3)].map((_, i) => (
+                      <div key={i} className="flex items-center gap-3">
+                        <Skeleton className="w-10 h-10 rounded-full shrink-0" />
+                        <div className="flex-1 space-y-1.5">
+                          <Skeleton className="h-4 w-24" />
+                          <Skeleton className="h-3 w-16" />
+                        </div>
+                        <Skeleton className="w-16 h-8 rounded-md shrink-0" />
+                      </div>
+                    ))}
+                  </div>
+                ) : blockedList.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-8 gap-2 text-muted-foreground">
+                    <ShieldOff className="w-10 h-10 opacity-30" />
+                    <p className="text-sm">黑名单为空</p>
+                  </div>
+                ) : (
+                  <div className="space-y-2 max-h-72 overflow-y-auto">
+                    {blockedList.map(entry => (
+                      <div key={entry.id} className="flex items-center gap-3 p-2 rounded-lg hover:bg-muted">
+                        <Avatar className="w-10 h-10 shrink-0">
+                          <AvatarImage src={entry.profile.avatar_url ?? ''} />
+                          <AvatarFallback className="bg-primary text-primary-foreground text-sm">
+                            {entry.profile.nickname.charAt(0).toUpperCase()}
+                          </AvatarFallback>
+                        </Avatar>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium truncate">{entry.profile.nickname}</p>
+                          <p className="text-xs text-muted-foreground truncate">@{entry.profile.username}</p>
+                        </div>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-8 text-xs shrink-0"
+                          onClick={() => setUnblockTarget(entry)}
+                        >
+                          解除拉黑
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </DialogContent>
+          </Dialog>
         </div>
       </div>
+
+      {/* 解除拉黑确认 */}
+      <AlertDialog open={!!unblockTarget} onOpenChange={o => { if (!o) setUnblockTarget(null); }}>
+        <AlertDialogContent className="max-w-[calc(100%-2rem)] md:max-w-lg">
+          <AlertDialogHeader>
+            <AlertDialogTitle>解除拉黑</AlertDialogTitle>
+            <AlertDialogDescription>
+              确定解除对 <span className="font-medium text-foreground">{unblockTarget?.profile.nickname}</span> 的拉黑？解除后对方可以再次向您发送消息。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction onClick={handleUnblock}>确定解除</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

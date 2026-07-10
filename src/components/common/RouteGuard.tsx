@@ -17,8 +17,16 @@ const PUBLIC_ROUTES = [...SYSTEM_PUBLIC_ROUTES, ...routePublicPaths];
 
 function matchPublicRoute(path: string, patterns: string[]) {
   return patterns.some(pattern => {
+    // 处理通配符 *
     if (pattern.includes('*')) {
       const regex = new RegExp('^' + pattern.replace('*', '.*') + '$');
+      return regex.test(path);
+    }
+    // 处理 React Router 动态参数 :param
+    if (pattern.includes(':')) {
+      const regex = new RegExp(
+        '^' + pattern.replace(/:[^/]+/g, '[^/]+') + '$'
+      );
       return regex.test(path);
     }
     return path === pattern;
