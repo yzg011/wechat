@@ -116,9 +116,9 @@ export default function MainLayout() {
   }, [user]);
 
   return (
-    <div className="flex min-h-screen w-full bg-background">
+    <div className="flex [height:var(--app-h,100vh)] w-full bg-background overflow-hidden">
       {/* 桌面端侧边导航 */}
-      <aside className="hidden md:flex flex-col w-16 shrink-0 h-screen sticky top-0">
+      <aside className="hidden md:flex flex-col w-16 shrink-0 [height:var(--app-h,100vh)] sticky top-0">
         <Sidebar onTelepathy={() => setTelepathyOpen(true)} />
       </aside>
 
@@ -142,7 +142,7 @@ export default function MainLayout() {
       </Sheet>
 
       {/* 主内容区 */}
-      <div className="flex-1 min-w-0 flex flex-col h-screen overflow-hidden">
+      <div className="flex-1 min-w-0 flex flex-col [height:var(--app-h,100vh)] overflow-hidden">
         <Routes>
           <Route path="chat" element={<ConversationsPage />} />
           <Route path="chat/:conversationId" element={<ChatPage />} />
