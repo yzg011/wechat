@@ -27,8 +27,12 @@ export default function TelepathyDialog({ open, onOpenChange }: Props) {
     getMyTelepathyStatus().then(s => {
       if (!s) { setPhase('input'); return; }
       setStatus(s);
-      if (s.status === 'matched') setPhase('matched');
-      else setPhase('waiting');
+      if (s.status === 'matched') {
+        setMatchCount(s.match_count ?? 0);
+        setPhase('matched');
+      } else {
+        setPhase('waiting');
+      }
     });
   }, [open]);
 
@@ -88,7 +92,7 @@ export default function TelepathyDialog({ open, onOpenChange }: Props) {
         {phase === 'input' && (
           <div className="space-y-5 pt-1">
             <p className="text-sm text-muted-foreground leading-relaxed">
-              输入一个词语，24小时内若有陌生人输入了相同的词语，你们将自动配对聊天。
+              输入一个词语，5分钟内若有陌生人输入了相同的词语，你们将自动配对聊天。
               两人配对成私聊，三人及以上组成群聊。
             </p>
             <div className="space-y-3">
@@ -119,7 +123,7 @@ export default function TelepathyDialog({ open, onOpenChange }: Props) {
                 <p className="text-sm text-muted-foreground mt-1">
                   你的词语：<span className="font-semibold text-foreground">「{status?.keyword}」</span>
                 </p>
-                <p className="text-xs text-muted-foreground mt-2">有效期24小时，与你有缘的人出现时将自动配对</p>
+                <p className="text-xs text-muted-foreground mt-2">有效期5分钟，与你有缘的人出现时将自动配对</p>
               </div>
             </div>
             <Button variant="outline" className="w-full" onClick={reset}>

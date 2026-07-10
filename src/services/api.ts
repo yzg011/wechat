@@ -568,6 +568,7 @@ export interface TelepathyStatus {
   status: 'matched' | 'waiting';
   conversation_id: string | null;
   created_at: string;
+  match_count?: number;
 }
 
 export async function submitTelepathyKeyword(keyword: string): Promise<TelepathyResult> {
