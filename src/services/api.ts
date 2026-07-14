@@ -561,6 +561,7 @@ export interface TelepathyResult {
   status: 'matched' | 'waiting' | 'error';
   conversation_id?: string;
   match_count?: number;
+  created_at?: string;   // 窗口锚定时间（最早提交者的 created_at），matched 时由 RPC 返回
   message?: string;
 }
 export interface TelepathyStatus {

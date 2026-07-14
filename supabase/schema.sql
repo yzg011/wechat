@@ -232,43 +232,34 @@ $$;
 --
 
 CREATE OR REPLACE FUNCTION "public"."get_my_telepathy_status"() RETURNS json
-    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    LANGUAGE "sql" STABLE SECURITY DEFINER
     AS $$
-DECLARE
-  v_entry  record;
-  v_count  int := 0;
-BEGIN
-  -- 优先找5分钟内的词条（等待中或已配对）
-  SELECT * INTO v_entry
-  FROM telepathy_entries
-  WHERE user_id = auth.uid()
-    AND created_at >= now() - interval '5 minutes'
-  ORDER BY created_at DESC LIMIT 1;
-
-  -- 若无，则找最近一条已配对记录（配对后超过5分钟仍可进入聊天）
-  IF NOT FOUND THEN
-    SELECT * INTO v_entry
-    FROM telepathy_entries
-    WHERE user_id = auth.uid()
-      AND matched_at IS NOT NULL
-    ORDER BY matched_at DESC LIMIT 1;
-    IF NOT FOUND THEN RETURN NULL; END IF;
-  END IF;
-
-  IF v_entry.conversation_id IS NOT NULL THEN
-    SELECT COUNT(*) INTO v_count
-    FROM conversation_participants
-    WHERE conversation_id = v_entry.conversation_id;
-  END IF;
-
-  RETURN json_build_object(
-    'keyword',         v_entry.keyword,
-    'status',          CASE WHEN v_entry.matched_at IS NOT NULL THEN 'matched' ELSE 'waiting' END,
-    'conversation_id', v_entry.conversation_id,
-    'created_at',      v_entry.created_at,
-    'match_count',     v_count
+  SELECT COALESCE(
+    (SELECT json_build_object(
+      'keyword',         e.keyword,
+      'status',          CASE WHEN e.matched_at IS NOT NULL THEN 'matched' ELSE 'waiting' END,
+      'conversation_id', e.conversation_id,
+      'match_count',     CASE
+                           WHEN e.matched_at IS NOT NULL AND e.conversation_id IS NOT NULL THEN (
+                             SELECT COUNT(*)::int FROM telepathy_entries e2
+                             WHERE e2.conversation_id = e.conversation_id
+                           )
+                           ELSE NULL
+                         END,
+      'created_at',      CASE
+                           WHEN e.matched_at IS NOT NULL AND e.conversation_id IS NOT NULL THEN (
+                             SELECT MIN(e2.created_at) FROM telepathy_entries e2
+                             WHERE e2.conversation_id = e.conversation_id
+                           )
+                           ELSE e.created_at
+                         END
+    )
+    FROM telepathy_entries e
+    WHERE e.user_id    = auth.uid()
+      AND e.created_at >= now() - interval '5 minutes'
+    ORDER BY e.created_at DESC LIMIT 1),
+    'null'::json
   );
-END;
 $$;
 
 
@@ -471,143 +462,220 @@ CREATE OR REPLACE FUNCTION "public"."submit_telepathy_keyword"("p_keyword" "text
     LANGUAGE "plpgsql" SECURITY DEFINER
     AS $$
 DECLARE
-  v_my_id        uuid        := auth.uid();
-  v_keyword      text        := lower(trim(p_keyword));
-  v_first_at     timestamptz;
-  v_window_end   timestamptz;
-  v_all_users    uuid[];
-  v_user_count   int;
-  v_conv_id      uuid;
-  v_old_conv_id  uuid;
-  v_old_type     text;
-  v_group_id     uuid;
+  v_my_id           uuid        := auth.uid();
+  v_keyword         text        := lower(trim(p_keyword));
+  v_since           timestamptz := now() - interval '5 minutes';
+  v_existing_conv   uuid;
+  v_conv_type       text;
+  v_existing_group  uuid;
+  v_existing_users  uuid[];
+  v_partners        uuid[];
+  v_all_users       uuid[];
+  v_conv_id         uuid;
+  v_group_id        uuid;
+  v_anchor_time     timestamptz;
+  v_first_user_id   uuid;
 BEGIN
-  -- 基本校验
+  /* ── 校验 ── */
   IF length(v_keyword) < 1 OR length(v_keyword) > 30 THEN
     RETURN json_build_object('status','error','message','词语长度须在1-30字之间');
   END IF;
 
-  -- 查找本关键词当前活跃场次的锚定时间（最早一条、5分钟内的未过期词条）
-  SELECT MIN(created_at) INTO v_first_at
-  FROM telepathy_entries
-  WHERE keyword = v_keyword
-    AND created_at >= now() - interval '5 minutes';
-
-  -- 若无活跃场次，或活跃场次已过期（时间窗已关闭），则本用户开启新场次
-  IF v_first_at IS NULL THEN
-    INSERT INTO telepathy_entries(user_id, keyword) VALUES(v_my_id, v_keyword);
-    RETURN json_build_object('status','waiting','message','词语已记录，等待与你有缘的人…');
+  /* ── 当前用户必须有 profile ── */
+  IF NOT EXISTS (SELECT 1 FROM profiles WHERE id = v_my_id) THEN
+    RETURN json_build_object('status','error','message','用户信息未初始化，请重新登录');
   END IF;
 
-  v_window_end := v_first_at + interval '5 minutes';
-
-  -- 本用户是否已在本场次中
+  /* ── 当前用户 5 分钟内已提交过该词语 ── */
   IF EXISTS (
     SELECT 1 FROM telepathy_entries
     WHERE user_id = v_my_id AND keyword = v_keyword
-      AND created_at >= v_first_at AND created_at <= v_window_end
+      AND created_at >= v_since
   ) THEN
-    -- 已在场次，查当前匹配状态
-    SELECT conversation_id INTO v_conv_id
-    FROM telepathy_entries
-    WHERE user_id = v_my_id AND keyword = v_keyword
-      AND created_at >= v_first_at
-    ORDER BY created_at DESC LIMIT 1;
-
-    IF v_conv_id IS NOT NULL THEN
-      RETURN json_build_object('status','matched','conversation_id',v_conv_id,
-        'match_count',(SELECT COUNT(*) FROM conversation_participants WHERE conversation_id = v_conv_id));
-    END IF;
     RETURN json_build_object('status','waiting','message','已在等待配对中');
   END IF;
 
-  -- 将当前用户加入本场次
-  INSERT INTO telepathy_entries(user_id, keyword) VALUES(v_my_id, v_keyword);
-
-  -- 收集本场次（锚定时间起5分钟内）所有用户（含自己）
-  SELECT ARRAY_AGG(DISTINCT user_id) INTO v_all_users
-  FROM telepathy_entries
-  WHERE keyword = v_keyword
-    AND created_at >= v_first_at
-    AND created_at <= v_window_end;
-
-  v_user_count := coalesce(array_length(v_all_users, 1), 0);
-
-  IF v_user_count < 2 THEN
-    RETURN json_build_object('status','waiting','message','词语已记录，等待配对中…');
-  END IF;
-
-  -- 查找本场次已有的会话（如有）
-  SELECT DISTINCT e.conversation_id INTO v_old_conv_id
+  /* ── 检查 5 分钟内是否已有同词语的配对成功对话 ── */
+  SELECT DISTINCT e.conversation_id INTO v_existing_conv
   FROM telepathy_entries e
-  WHERE e.keyword = v_keyword
-    AND e.created_at >= v_first_at
+  WHERE e.keyword    = v_keyword
+    AND e.created_at >= v_since
+    AND e.matched_at IS NOT NULL
     AND e.conversation_id IS NOT NULL
   LIMIT 1;
 
-  IF v_old_conv_id IS NULL THEN
-    -- 首次配对：2人建私聊，3人以上建群聊
-    IF v_user_count = 2 THEN
-      INSERT INTO conversations(type) VALUES('private') RETURNING id INTO v_conv_id;
-      INSERT INTO conversation_participants(conversation_id, user_id)
-        SELECT v_conv_id, unnest(v_all_users);
-    ELSE
-      INSERT INTO groups(name, owner_id)
-        VALUES('心有灵犀·' || v_keyword, v_my_id) RETURNING id INTO v_group_id;
-      INSERT INTO conversations(type, group_id) VALUES('group', v_group_id) RETURNING id INTO v_conv_id;
-      INSERT INTO group_members(group_id, user_id)
-        SELECT v_group_id, unnest(v_all_users);
-      INSERT INTO conversation_participants(conversation_id, user_id)
-        SELECT v_conv_id, unnest(v_all_users);
+  IF v_existing_conv IS NOT NULL THEN
+
+    /* 早退出：当前用户已是该对话成员 */
+    IF EXISTS (
+      SELECT 1 FROM conversation_participants
+      WHERE conversation_id = v_existing_conv AND user_id = v_my_id
+    ) THEN
+      SELECT MIN(e2.created_at) INTO v_anchor_time
+      FROM telepathy_entries e2 WHERE e2.conversation_id = v_existing_conv;
+      RETURN json_build_object(
+        'status',          'matched',
+        'conversation_id', v_existing_conv,
+        'match_count',     (SELECT COUNT(*) FROM telepathy_entries WHERE conversation_id = v_existing_conv),
+        'created_at',      v_anchor_time
+      );
     END IF;
 
-  ELSE
-    -- 已有会话：判断是否需要升级私聊→群聊
-    SELECT type INTO v_old_type FROM conversations WHERE id = v_old_conv_id;
+    SELECT type, group_id INTO v_conv_type, v_existing_group
+    FROM conversations WHERE id = v_existing_conv;
 
-    IF v_old_type = 'private' AND v_user_count >= 3 THEN
-      -- 升级：原私聊→新群聊，将所有人（含原两人）加入
+    IF v_conv_type = 'private' THEN
+      /* 私聊 → 升级为群聊；排除当前用户防重复，并只保留有 profile 的用户 */
+      SELECT ARRAY_AGG(DISTINCT cp.user_id) INTO v_existing_users
+      FROM conversation_participants cp
+      JOIN profiles p ON p.id = cp.user_id
+      WHERE cp.conversation_id = v_existing_conv
+        AND cp.user_id <> v_my_id;
+
+      v_all_users := COALESCE(v_existing_users, ARRAY[]::uuid[]) || ARRAY[v_my_id];
+
+      SELECT e2.user_id INTO v_first_user_id
+      FROM telepathy_entries e2
+      WHERE e2.conversation_id = v_existing_conv
+      ORDER BY e2.created_at ASC LIMIT 1;
+
       INSERT INTO groups(name, owner_id)
-        VALUES('心有灵犀·' || v_keyword,
-          (SELECT user_id FROM conversation_participants WHERE conversation_id = v_old_conv_id LIMIT 1))
+        VALUES('心有灵犀·' || v_keyword, v_first_user_id)
         RETURNING id INTO v_group_id;
-      INSERT INTO conversations(type, group_id) VALUES('group', v_group_id) RETURNING id INTO v_conv_id;
-      -- 加入所有场次用户
-      INSERT INTO group_members(group_id, user_id)
-        SELECT v_group_id, unnest(v_all_users);
-      INSERT INTO conversation_participants(conversation_id, user_id)
-        SELECT v_conv_id, unnest(v_all_users)
-        ON CONFLICT DO NOTHING;
-      -- 将本场次所有词条指向新群聊
-      UPDATE telepathy_entries
-      SET conversation_id = v_conv_id, matched_at = now()
-      WHERE keyword = v_keyword AND created_at >= v_first_at;
-      RETURN json_build_object('status','matched','conversation_id',v_conv_id,'match_count',v_user_count);
 
-    ELSIF v_old_type = 'group' THEN
-      -- 已是群聊：直接加入
-      v_conv_id := v_old_conv_id;
-      SELECT group_id INTO v_group_id FROM conversations WHERE id = v_conv_id;
-      INSERT INTO group_members(group_id, user_id) VALUES(v_group_id, v_my_id) ON CONFLICT DO NOTHING;
-      INSERT INTO conversation_participants(conversation_id, user_id) VALUES(v_conv_id, v_my_id) ON CONFLICT DO NOTHING;
+      INSERT INTO conversations(type, group_id)
+        VALUES('group', v_group_id)
+        RETURNING id INTO v_conv_id;
+
+      /* 只插入有 profile 的用户（JOIN profiles 过滤） */
+      INSERT INTO group_members(group_id, user_id)
+        SELECT v_group_id, uid
+        FROM unnest(v_all_users) AS uid
+        JOIN profiles p ON p.id = uid
+        ON CONFLICT DO NOTHING;
+
+      INSERT INTO conversation_participants(conversation_id, user_id)
+        SELECT v_conv_id, uid
+        FROM unnest(v_all_users) AS uid
+        JOIN profiles p ON p.id = uid
+        ON CONFLICT DO NOTHING;
+
+      UPDATE telepathy_entries
+        SET conversation_id = v_conv_id
+        WHERE conversation_id = v_existing_conv;
 
     ELSE
-      -- 私聊且仍是2人（不应出现，但兜底）
-      v_conv_id := v_old_conv_id;
+      /* 已是群聊 → 直接加入 */
+      v_conv_id  := v_existing_conv;
+      v_group_id := v_existing_group;
+
+      INSERT INTO group_members(group_id, user_id)
+        VALUES(v_group_id, v_my_id)
+        ON CONFLICT DO NOTHING;
+
+      INSERT INTO conversation_participants(conversation_id, user_id)
+        VALUES(v_conv_id, v_my_id)
+        ON CONFLICT DO NOTHING;
+
+      SELECT ARRAY_AGG(user_id) INTO v_all_users
+      FROM conversation_participants
+      WHERE conversation_id = v_conv_id;
     END IF;
+
+    INSERT INTO telepathy_entries(user_id, keyword, matched_at, conversation_id)
+      VALUES(v_my_id, v_keyword, now(), v_conv_id);
+
+    SELECT MIN(e3.created_at) INTO v_anchor_time
+    FROM telepathy_entries e3
+    WHERE e3.conversation_id = v_conv_id;
+
+    RETURN json_build_object(
+      'status',          'matched',
+      'conversation_id', v_conv_id,
+      'match_count',     (SELECT COUNT(*) FROM telepathy_entries WHERE conversation_id = v_conv_id),
+      'created_at',      v_anchor_time
+    );
   END IF;
 
-  -- 标记本场次所有词条已配对
-  UPDATE telepathy_entries
-  SET matched_at = now(), conversation_id = v_conv_id
-  WHERE keyword = v_keyword
-    AND created_at >= v_first_at
+  /* ── 无已配对对话：插入词条，尝试与等待者配对 ── */
+  INSERT INTO telepathy_entries(user_id, keyword) VALUES(v_my_id, v_keyword);
+
+  SELECT ARRAY_AGG(DISTINCT user_id) INTO v_partners
+  FROM telepathy_entries
+  WHERE keyword    = v_keyword
+    AND created_at >= v_since
+    AND matched_at IS NULL
+    AND user_id   <> v_my_id;
+
+  IF v_partners IS NULL OR array_length(v_partners, 1) = 0 THEN
+    RETURN json_build_object('status','waiting','message','词语已记录，等待配对中…');
+  END IF;
+
+  SELECT ARRAY_AGG(DISTINCT uid) INTO v_all_users
+  FROM unnest(v_partners || ARRAY[v_my_id]) uid;
+
+  SELECT MIN(created_at) INTO v_anchor_time
+  FROM telepathy_entries
+  WHERE keyword = v_keyword AND created_at >= v_since
     AND user_id = ANY(v_all_users);
 
+  SELECT user_id INTO v_first_user_id
+  FROM telepathy_entries
+  WHERE keyword    = v_keyword
+    AND created_at >= v_since
+    AND matched_at IS NULL
+    AND user_id    = ANY(v_all_users)
+  ORDER BY created_at ASC LIMIT 1;
+
+  IF array_length(v_all_users, 1) = 2 THEN
+    SELECT cp1.conversation_id INTO v_conv_id
+    FROM conversation_participants cp1
+    JOIN conversation_participants cp2 ON cp1.conversation_id = cp2.conversation_id
+    JOIN conversations c ON c.id = cp1.conversation_id
+    WHERE cp1.user_id = v_all_users[1]
+      AND cp2.user_id = v_all_users[2]
+      AND c.type = 'private'
+    LIMIT 1;
+
+    IF v_conv_id IS NULL THEN
+      INSERT INTO conversations(type) VALUES('private') RETURNING id INTO v_conv_id;
+      INSERT INTO conversation_participants(conversation_id, user_id)
+        SELECT v_conv_id, uid
+        FROM unnest(v_all_users) AS uid
+        JOIN profiles p ON p.id = uid
+        ON CONFLICT DO NOTHING;
+    END IF;
+  ELSE
+    INSERT INTO groups(name, owner_id)
+      VALUES('心有灵犀·' || v_keyword, v_first_user_id)
+      RETURNING id INTO v_group_id;
+    INSERT INTO conversations(type, group_id) VALUES('group', v_group_id) RETURNING id INTO v_conv_id;
+
+    INSERT INTO group_members(group_id, user_id)
+      SELECT v_group_id, uid
+      FROM unnest(v_all_users) AS uid
+      JOIN profiles p ON p.id = uid
+      ON CONFLICT DO NOTHING;
+
+    INSERT INTO conversation_participants(conversation_id, user_id)
+      SELECT v_conv_id, uid
+      FROM unnest(v_all_users) AS uid
+      JOIN profiles p ON p.id = uid
+      ON CONFLICT DO NOTHING;
+  END IF;
+
+  UPDATE telepathy_entries
+    SET matched_at = now(), conversation_id = v_conv_id
+    WHERE keyword    = v_keyword
+      AND created_at >= v_since
+      AND matched_at IS NULL
+      AND user_id    = ANY(v_all_users);
+
   RETURN json_build_object(
-    'status','matched',
+    'status',          'matched',
     'conversation_id', v_conv_id,
-    'match_count', v_user_count
+    'match_count',     array_length(v_all_users, 1),
+    'created_at',      v_anchor_time
   );
 END;
 $$;
