@@ -155,7 +155,8 @@ export default function ContactsPage() {
             <DialogContent className="max-w-[calc(100%-2rem)] md:max-w-md">
               <DialogHeader><DialogTitle>添加好友</DialogTitle></DialogHeader>
               <div className="flex gap-2 mt-2">
-                <Input placeholder="搜索用户名或昵称" value={searchQ} onChange={e => setSearchQ(e.target.value)}
+                <Input id="contact-search" name="contact-search" autoComplete="off"
+                  placeholder="搜索用户名或昵称" value={searchQ} onChange={e => setSearchQ(e.target.value)}
                   onKeyDown={e => e.key === 'Enter' && handleSearch()} className="flex-1" />
                 <Button onClick={handleSearch} disabled={searching}><Search className="w-4 h-4" /></Button>
               </div>
@@ -191,7 +192,8 @@ export default function ContactsPage() {
             </DialogTrigger>
             <DialogContent className="max-w-[calc(100%-2rem)] md:max-w-md">
               <DialogHeader><DialogTitle>创建群组</DialogTitle></DialogHeader>
-              <Input placeholder="群组名称" value={groupName} onChange={e => setGroupName(e.target.value)} className="mt-2" />
+              <Input id="group-name" name="group-name" autoComplete="off"
+                placeholder="群组名称" value={groupName} onChange={e => setGroupName(e.target.value)} className="mt-2" />
               <p className="text-sm text-muted-foreground mt-3 mb-2">选择好友（至少1位）</p>
               <div className="space-y-2 max-h-60 overflow-y-auto">
                 {friends.map(f => (

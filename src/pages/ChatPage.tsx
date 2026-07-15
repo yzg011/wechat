@@ -86,6 +86,9 @@ function AnnouncementEditor({
       {editing ? (
         <div className="space-y-2 mt-1">
           <Textarea
+            id="group-announcement"
+            name="group-announcement"
+            autoComplete="off"
             value={text}
             onChange={e => setText(e.target.value)}
             placeholder="输入群公告内容…"
@@ -691,7 +694,8 @@ export default function ChatPage() {
             <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
           </div>
           {/* text-base(16px) 阻止 iOS Safari 在聚焦时自动缩放页面 */}
-          <Textarea ref={textareaRef} value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleKeyDown}
+          <Textarea ref={textareaRef} id="chat-message-input" name="chat-message-input" autoComplete="off"
+            value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleKeyDown}
             placeholder="发送消息…"
             className="flex-1 min-h-[40px] max-h-32 resize-none text-base md:text-sm border-0 bg-muted focus-visible:ring-0 rounded-xl px-3 py-2"
             rows={1} />

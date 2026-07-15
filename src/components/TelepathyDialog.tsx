@@ -172,6 +172,9 @@ export default function TelepathyDialog({ open, onOpenChange }: Props) {
             </p>
             <div className="space-y-3">
               <Input
+                id="telepathy-keyword"
+                name="telepathy-keyword"
+                autoComplete="off"
                 placeholder="输入你的词语（最多30字）"
                 value={keyword}
                 maxLength={30}
