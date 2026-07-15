@@ -690,9 +690,10 @@ export default function ChatPage() {
             </button>
             <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
           </div>
+          {/* text-base(16px) 阻止 iOS Safari 在聚焦时自动缩放页面 */}
           <Textarea ref={textareaRef} value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleKeyDown}
             placeholder="发送消息…"
-            className="flex-1 min-h-[40px] max-h-32 resize-none text-sm border-0 bg-muted focus-visible:ring-0 rounded-xl px-3 py-2"
+            className="flex-1 min-h-[40px] max-h-32 resize-none text-base md:text-sm border-0 bg-muted focus-visible:ring-0 rounded-xl px-3 py-2"
             rows={1} />
           <Button onClick={handleSend} disabled={sending || !input.trim()} size="icon" className="h-9 w-9 rounded-full shrink-0">
             <Send className="w-4 h-4" />
