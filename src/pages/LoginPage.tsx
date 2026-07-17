@@ -1,24 +1,62 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { toast } from 'sonner';
-import { MessageCircle, Eye, EyeOff } from 'lucide-react';
+import { MessageCircle, Eye, EyeOff, Mail, CheckCircle, XCircle, Loader } from 'lucide-react';
+
+type UsernameStatus = 'idle' | 'checking' | 'available' | 'taken';
 
 export default function LoginPage() {
-  const { signInWithUsername, signUpWithUsername } = useAuth();
+  const { signInWithUsername, signUpWithUsername, sendPasswordResetEmail, checkUsernameAvailable, verifyResetEmail } = useAuth();
   const navigate = useNavigate();
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [username, setUsername] = useState('');
   const [nickname, setNickname] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPwd, setConfirmPwd] = useState('');
   const [showPwd, setShowPwd] = useState(false);
   const [agreed, setAgreed] = useState(false);
   const [loading, setLoading] = useState(false);
+
+  // 用户名实时校验
+  const [usernameStatus, setUsernameStatus] = useState<UsernameStatus>('idle');
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // 忘记密码弹窗
+  const [forgotOpen, setForgotOpen] = useState(false);
+  const [forgotUsername, setForgotUsername] = useState('');
+  const [forgotEmail, setForgotEmail] = useState('');
+  const [forgotLoading, setForgotLoading] = useState(false);
+
+  // 注册模式下：用户名实时防抖校验
+  useEffect(() => {
+    if (mode !== 'register') return;
+    if (!username || !/^[a-zA-Z0-9_]+$/.test(username)) {
+      setUsernameStatus('idle');
+      return;
+    }
+    setUsernameStatus('checking');
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(async () => {
+      const available = await checkUsernameAvailable(username);
+      setUsernameStatus(available ? 'available' : 'taken');
+    }, 500);
+    return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
+  }, [username, mode, checkUsernameAvailable]);
+
+  // 切换模式时重置
+  const switchMode = (m: 'login' | 'register') => {
+    setMode(m);
+    setUsername(''); setNickname(''); setEmail('');
+    setPassword(''); setConfirmPwd('');
+    setUsernameStatus('idle');
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -26,8 +64,11 @@ export default function LoginPage() {
     if (!/^[a-zA-Z0-9_]+$/.test(username)) { toast.error('用户名只能包含字母、数字和下划线'); return; }
     if (!password) { toast.error('请输入密码'); return; }
     if (mode === 'register') {
+      if (usernameStatus === 'taken') { toast.error('用户名已被使用，请更换'); return; }
+      if (usernameStatus === 'checking') { toast.error('用户名校验中，请稍候'); return; }
       if (password.length < 6) { toast.error('密码至少6位'); return; }
       if (password !== confirmPwd) { toast.error('两次密码不一致'); return; }
+      if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { toast.error('邮箱格式不正确'); return; }
       if (!agreed) { toast.error('请先同意用户协议和隐私政策'); return; }
     }
     setLoading(true);
@@ -38,7 +79,7 @@ export default function LoginPage() {
         toast.success('登录成功');
         navigate('/chat', { replace: true });
       } else {
-        const { error } = await signUpWithUsername(username, password, nickname || username);
+        const { error } = await signUpWithUsername(username, password, nickname || username, email || undefined);
         if (error) {
           if (error.message?.includes('already')) toast.error('用户名已被使用，请更换');
           else toast.error(error.message || '注册失败');
@@ -51,6 +92,54 @@ export default function LoginPage() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleForgotSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const uname = forgotUsername.trim();
+    const mail = forgotEmail.trim();
+    if (!uname) { toast.error('请输入用户名'); return; }
+    if (!mail) { toast.error('请输入邮箱'); return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail)) { toast.error('邮箱格式不正确'); return; }
+
+    setForgotLoading(true);
+    // 先校验邮箱是否与注册时一致
+    const result = await verifyResetEmail(uname, mail);
+    if (result === 'no_user') {
+      setForgotLoading(false);
+      toast.error('用户名不存在');
+      return;
+    }
+    if (result === 'no_email') {
+      setForgotLoading(false);
+      toast.error('该账号未绑定邮箱，无法通过邮箱找回密码');
+      setForgotOpen(false);
+      setForgotUsername(''); setForgotEmail('');
+      return;
+    }
+    if (result === 'mismatch') {
+      setForgotLoading(false);
+      toast.error('邮箱与注册时填写的不一致，请重新输入');
+      setForgotOpen(false);
+      setForgotUsername(''); setForgotEmail('');
+      return;
+    }
+    // result === 'ok'，发送重置邮件
+    const { error } = await sendPasswordResetEmail(mail);
+    setForgotLoading(false);
+    if (error) { toast.error('发送失败：' + error.message); return; }
+    toast.success('重置邮件已发送，请查收收件箱');
+    setForgotOpen(false);
+    setForgotUsername(''); setForgotEmail('');
+  };
+
+  // 用户名状态图标
+  const UsernameStatusIcon = () => {
+    if (mode !== 'register' || !username || !/^[a-zA-Z0-9_]+$/.test(username)) return null;
+    if (usernameStatus === 'checking') return <Loader className="w-4 h-4 text-muted-foreground animate-spin" />;
+    if (usernameStatus === 'available') return <CheckCircle className="w-4 h-4 text-green-500" />;
+    if (usernameStatus === 'taken') return <XCircle className="w-4 h-4 text-destructive" />;
+    return null;
   };
 
   return (
@@ -93,14 +182,25 @@ export default function LoginPage() {
           <form onSubmit={handleSubmit} className="flex flex-col gap-4">
             <div className="space-y-1.5">
               <Label htmlFor="username">用户名</Label>
-              <Input
-                id="username"
-                placeholder="仅支持字母、数字、下划线"
-                value={username}
-                onChange={e => setUsername(e.target.value.trim())}
-                autoComplete="username"
-                className="h-11"
-              />
+              <div className="relative">
+                <Input
+                  id="username"
+                  placeholder="仅支持字母、数字、下划线"
+                  value={username}
+                  onChange={e => setUsername(e.target.value.trim())}
+                  autoComplete="username"
+                  className={`h-11 pr-9 ${mode === 'register' && usernameStatus === 'taken' ? 'border-destructive focus-visible:ring-destructive' : ''}`}
+                />
+                <span className="absolute right-3 top-1/2 -translate-y-1/2">
+                  <UsernameStatusIcon />
+                </span>
+              </div>
+              {mode === 'register' && usernameStatus === 'taken' && (
+                <p className="text-xs text-destructive">用户名已被使用，请换一个</p>
+              )}
+              {mode === 'register' && usernameStatus === 'available' && (
+                <p className="text-xs text-green-600">用户名可用</p>
+              )}
             </div>
 
             {mode === 'register' && (
@@ -113,6 +213,28 @@ export default function LoginPage() {
                   onChange={e => setNickname(e.target.value)}
                   className="h-11"
                 />
+              </div>
+            )}
+
+            {mode === 'register' && (
+              <div className="space-y-1.5">
+                <Label htmlFor="reg-email">
+                  邮箱
+                  <span className="ml-1.5 text-xs text-muted-foreground font-normal">（可选，用于找回密码）</span>
+                </Label>
+                <div className="relative">
+                  <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+                  <Input
+                    id="reg-email"
+                    name="reg-email"
+                    type="email"
+                    autoComplete="email"
+                    placeholder="your@email.com"
+                    value={email}
+                    onChange={e => setEmail(e.target.value.trim())}
+                    className="h-11 pl-9"
+                  />
+                </div>
               </div>
             )}
 
@@ -167,20 +289,83 @@ export default function LoginPage() {
               </div>
             )}
 
-            <Button type="submit" className="h-11 text-base font-semibold mt-2" disabled={loading}>
+            <Button type="submit" className="h-11 text-base font-semibold mt-2" disabled={loading || (mode === 'register' && usernameStatus === 'taken')}>
               {loading ? '请稍候…' : mode === 'login' ? '登录' : '注册'}
             </Button>
+
+            {/* 忘记密码入口（仅登录模式） */}
+            {mode === 'login' && (
+              <div className="text-right -mt-1">
+                <button
+                  type="button"
+                  onClick={() => { setForgotUsername(''); setForgotEmail(''); setForgotOpen(true); }}
+                  className="text-sm text-primary hover:underline underline-offset-2"
+                >
+                  忘记密码？
+                </button>
+              </div>
+            )}
           </form>
 
           <div className="mt-6 text-center text-sm text-muted-foreground">
             {mode === 'login' ? (
-              <>还没有账号？<button className="text-primary font-medium hover:underline" onClick={() => setMode('register')}>立即注册</button></>
+              <>还没有账号？<button className="text-primary font-medium hover:underline" onClick={() => switchMode('register')}>立即注册</button></>
             ) : (
-              <>已有账号？<button className="text-primary font-medium hover:underline" onClick={() => setMode('login')}>返回登录</button></>
+              <>已有账号？<button className="text-primary font-medium hover:underline" onClick={() => switchMode('login')}>返回登录</button></>
             )}
           </div>
         </div>
       </div>
+
+      {/* 忘记密码弹窗 */}
+      <Dialog open={forgotOpen} onOpenChange={o => { setForgotOpen(o); if (!o) { setForgotUsername(''); setForgotEmail(''); } }}>
+        <DialogContent className="max-w-[calc(100%-2rem)] md:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>找回密码</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            输入你的用户名和注册时绑定的邮箱，验证通过后发送密码重置链接。
+          </p>
+          <form onSubmit={handleForgotSubmit} className="space-y-4 mt-1">
+            <div className="space-y-1.5">
+              <Label htmlFor="forgot-username">用户名</Label>
+              <Input
+                id="forgot-username"
+                name="forgot-username"
+                autoComplete="username"
+                placeholder="你的登录用户名"
+                value={forgotUsername}
+                onChange={e => setForgotUsername(e.target.value.trim())}
+                className="h-11 text-base"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="forgot-email">注册邮箱</Label>
+              <div className="relative">
+                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+                <Input
+                  id="forgot-email"
+                  name="forgot-email"
+                  type="email"
+                  autoComplete="email"
+                  placeholder="your@email.com"
+                  value={forgotEmail}
+                  onChange={e => setForgotEmail(e.target.value.trim())}
+                  className="h-11 pl-9 text-base"
+                />
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <Button type="button" variant="secondary" className="flex-1 h-11" onClick={() => setForgotOpen(false)}>
+                取消
+              </Button>
+              <Button type="submit" className="flex-1 h-11" disabled={forgotLoading}>
+                {forgotLoading ? '验证中…' : '发送重置邮件'}
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

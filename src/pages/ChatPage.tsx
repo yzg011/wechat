@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { ImagePreview } from '@/components/ui/image-preview';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/db/supabase';
 import {
@@ -136,6 +137,11 @@ export default function ChatPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   // 陌生人提示横幅
   const [showStrangerBanner, setShowStrangerBanner] = useState(false);
+  // 图片预览
+  const [previewSrc, setPreviewSrc] = useState<string | null>(null);
+  const previewImages = messages
+    .filter(m => m.message_type === 'image' && m.image_url)
+    .map(m => m.image_url as string);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -623,7 +629,7 @@ export default function ChatPage() {
                     /* 多选模式下气泡不触发 dropdown，直接展示 */
                     <div className={`px-3 py-2 text-sm ${isMine ? 'bubble-right' : 'bubble-left'}`}>
                       {msg.message_type === 'image'
-                        ? <img src={msg.image_url ?? ''} alt="图片" className="max-w-[200px] max-h-[200px] rounded-lg object-cover" />
+                        ? <img src={msg.image_url ?? ''} alt="图片" onClick={() => setPreviewSrc(msg.image_url)} className="max-w-[200px] max-h-[200px] rounded-lg object-cover cursor-pointer" />
                         : <p className="whitespace-pre-wrap break-words">{msg.content}</p>}
                     </div>
                   ) : (
@@ -631,7 +637,7 @@ export default function ChatPage() {
                       <DropdownMenuTrigger asChild>
                         <div className={`px-3 py-2 text-sm cursor-pointer select-text ${isMine ? 'bubble-right' : 'bubble-left'}`}>
                           {msg.message_type === 'image'
-                            ? <img src={msg.image_url ?? ''} alt="图片" className="max-w-[200px] max-h-[200px] rounded-lg object-cover" />
+                            ? <img src={msg.image_url ?? ''} alt="图片" onClick={e => { e.stopPropagation(); setPreviewSrc(msg.image_url); }} className="max-w-[200px] max-h-[200px] rounded-lg object-cover cursor-zoom-in" />
                             : <p className="whitespace-pre-wrap break-words">{msg.content}</p>}
                         </div>
                       </DropdownMenuTrigger>
@@ -733,6 +739,13 @@ export default function ChatPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* 图片全屏预览 */}
+      <ImagePreview
+        src={previewSrc}
+        images={previewImages}
+        onClose={() => setPreviewSrc(null)}
+      />
     </div>
   );
 }

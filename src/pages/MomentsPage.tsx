@@ -5,6 +5,7 @@ import {
   getMoments, createMoment, deleteMoment,
   toggleLike, addComment, deleteComment, uploadMomentImage
 } from '@/services/api';
+import { ImagePreview } from '@/components/ui/image-preview';
 import type { Moment } from '@/types/types';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
@@ -19,23 +20,25 @@ import {
 import { formatDistanceToNow } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
 
-// 图片网格
-function ImageGrid({ urls }: { urls: string[] }) {
+// 图片网格（支持点击预览）
+function ImageGrid({ urls, onPreview }: { urls: string[]; onPreview: (url: string) => void }) {
   if (!urls.length) return null;
   const count = urls.length;
   const gridClass = count === 1
     ? 'grid grid-cols-1'
     : count === 2
     ? 'grid grid-cols-2 gap-1'
-    : count >= 4
-    ? 'grid grid-cols-3 gap-1'
     : 'grid grid-cols-3 gap-1';
 
   return (
     <div className={`mt-2 rounded-lg overflow-hidden ${gridClass} max-w-xs`}>
       {urls.slice(0, 9).map((url, i) => (
-        <div key={i} className={`${count === 1 ? 'aspect-[4/3]' : 'aspect-square'} overflow-hidden bg-muted`}>
-          <img src={url} alt="" className="w-full h-full object-cover" />
+        <div
+          key={i}
+          className={`${count === 1 ? 'aspect-[4/3]' : 'aspect-square'} overflow-hidden bg-muted cursor-zoom-in`}
+          onClick={() => onPreview(url)}
+        >
+          <img src={url} alt="" className="w-full h-full object-cover hover:opacity-90 transition-opacity" />
         </div>
       ))}
     </div>
@@ -45,7 +48,7 @@ function ImageGrid({ urls }: { urls: string[] }) {
 // 单条朋友圈
 function MomentCard({
   moment, currentUserId,
-  onLike, onComment, onDelete, onDeleteComment,
+  onLike, onComment, onDelete, onDeleteComment, onPreview,
 }: {
   moment: Moment;
   currentUserId: string;
@@ -53,6 +56,7 @@ function MomentCard({
   onComment: (m: Moment, text: string) => void;
   onDelete: (m: Moment) => void;
   onDeleteComment: (momentId: string, commentId: string) => void;
+  onPreview: (url: string, urls: string[]) => void;
 }) {
   const [showCommentInput, setShowCommentInput] = useState(false);
   const [commentText, setCommentText] = useState('');
@@ -105,7 +109,7 @@ function MomentCard({
           )}
 
           {/* 图片 */}
-          <ImageGrid urls={moment.image_urls} />
+          <ImageGrid urls={moment.image_urls} onPreview={url => onPreview(url, moment.image_urls)} />
 
           {/* 点赞 & 评论操作栏 */}
           <div className="flex items-center gap-4 mt-3 pt-3 border-t border-border">
@@ -192,6 +196,8 @@ export default function MomentsPage() {
   const [uploading, setUploading] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Moment | null>(null);
+  const [previewSrc, setPreviewSrc] = useState<string | null>(null);
+  const [previewImages, setPreviewImages] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -320,6 +326,7 @@ export default function MomentsPage() {
                 onComment={handleComment}
                 onDelete={handleDelete}
                 onDeleteComment={handleDeleteComment}
+                onPreview={(url, urls) => { setPreviewSrc(url); setPreviewImages(urls); }}
               />
             ))}
           </div>
@@ -409,6 +416,13 @@ export default function MomentsPage() {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* 图片全屏预览 */}
+      <ImagePreview
+        src={previewSrc}
+        images={previewImages}
+        onClose={() => { setPreviewSrc(null); setPreviewImages([]); }}
+      />
     </div>
   );
 }

@@ -133,6 +133,20 @@ $$;
 
 
 --
+-- Name: check_username_available("text"); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE OR REPLACE FUNCTION "public"."check_username_available"("p_username" "text") RETURNS boolean
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+  SELECT NOT EXISTS (
+    SELECT 1 FROM profiles WHERE username = p_username
+  );
+$$;
+
+
+--
 -- Name: clear_conversation_messages("uuid"); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -224,6 +238,18 @@ CREATE OR REPLACE FUNCTION "public"."find_nearby_users"("p_lat" double precision
     ) <= p_radius_km
   ORDER BY distance_km ASC
   LIMIT p_limit;
+$$;
+
+
+--
+-- Name: get_email_by_username("text"); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE OR REPLACE FUNCTION "public"."get_email_by_username"("p_username" "text") RETURNS "text"
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+  SELECT email FROM profiles WHERE username = p_username LIMIT 1;
 $$;
 
 
@@ -728,6 +754,24 @@ END;
 $$;
 
 
+--
+-- Name: verify_reset_email("text", "text"); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE OR REPLACE FUNCTION "public"."verify_reset_email"("p_username" "text", "p_email" "text") RETURNS "text"
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+  SELECT CASE
+    WHEN email IS NULL OR email = '' THEN 'no_email'
+    WHEN lower(email) = lower(p_email) THEN 'ok'
+    ELSE 'mismatch'
+  END
+  FROM profiles WHERE username = p_username
+  LIMIT 1;
+$$;
+
+
 SET default_tablespace = '';
 
 SET default_table_access_method = "heap";
@@ -915,6 +959,13 @@ CREATE TABLE IF NOT EXISTS "public"."profiles" (
     "longitude" double precision,
     "location_updated_at" timestamp with time zone
 );
+
+
+--
+-- Name: COLUMN "profiles"."email"; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN "public"."profiles"."email" IS '用户绑定的真实邮箱，用于找回密码';
 
 
 --
