@@ -28,6 +28,7 @@ interface AuthContextType {
   sendPasswordResetEmail: (email: string) => Promise<{ error: Error | null }>;
   checkUsernameAvailable: (username: string) => Promise<boolean>;
   verifyResetEmail: (username: string, email: string) => Promise<'ok' | 'mismatch' | 'no_email' | 'no_user'>;
+  updateEmail: (newEmail: string) => Promise<{ error: Error | null }>;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<void>;
 }
@@ -158,6 +159,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  const updateEmail = async (newEmail: string) => {
+    try {
+      if (!user) throw new Error('未登录');
+      // 更新 auth.users 邮箱
+      const { error } = await supabase.auth.updateUser({ email: newEmail });
+      if (error) throw error;
+      // 同步写入 profiles.email
+      await supabase.from('profiles').update({ email: newEmail }).eq('id', user.id);
+      return { error: null };
+    } catch (error) {
+      return { error: error as Error };
+    }
+  };
+
   const signOut = async () => {
     await supabase.auth.signOut();
     setUser(null);
@@ -165,7 +180,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, profile, loading, signInWithUsername, signUpWithUsername, signOut, refreshProfile, sendPasswordResetEmail, checkUsernameAvailable, verifyResetEmail }}>
+    <AuthContext.Provider value={{ user, profile, loading, signInWithUsername, signUpWithUsername, signOut, refreshProfile, sendPasswordResetEmail, checkUsernameAvailable, verifyResetEmail, updateEmail }}>
       {children}
     </AuthContext.Provider>
   );

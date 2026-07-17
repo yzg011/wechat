@@ -12,11 +12,11 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { toast } from 'sonner';
-import { Camera, Save, LogOut, KeyRound, Eye, EyeOff, ShieldOff, Ban } from 'lucide-react';
+import { Camera, Save, LogOut, KeyRound, Eye, EyeOff, ShieldOff, Ban, Mail } from 'lucide-react';
 import { supabase } from '@/db/supabase';
 
 export default function ProfilePage() {
-  const { user, profile, signOut, refreshProfile } = useAuth();
+  const { user, profile, signOut, refreshProfile, updateEmail } = useAuth();
   const [nickname, setNickname] = useState('');
   const [bio, setBio] = useState('');
   const [saving, setSaving] = useState(false);
@@ -32,6 +32,11 @@ export default function ProfilePage() {
   const [showNew, setShowNew] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
   const [changingPwd, setChangingPwd] = useState(false);
+
+  // 修改邮箱弹窗状态
+  const [emailOpen, setEmailOpen] = useState(false);
+  const [newEmail, setNewEmail] = useState('');
+  const [changingEmail, setChangingEmail] = useState(false);
 
   // 黑名单弹窗状态
   const [blacklistOpen, setBlacklistOpen] = useState(false);
@@ -102,7 +107,6 @@ export default function ProfilePage() {
     if (newPwd.length < 6) { toast.error('新密码至少需要 6 位'); return; }
     if (newPwd !== confirmPwd) { toast.error('两次输入的新密码不一致'); return; }
     setChangingPwd(true);
-    // 先用当前密码重新验证身份
     const email = user?.email;
     if (email && currentPwd) {
       const { error: signInErr } = await supabase.auth.signInWithPassword({ email, password: currentPwd });
@@ -118,6 +122,25 @@ export default function ProfilePage() {
     toast.success('密码修改成功');
     setPwdOpen(false);
     setCurrentPwd(''); setNewPwd(''); setConfirmPwd('');
+  };
+
+  const handleChangeEmail = async () => {
+    const trimmed = newEmail.trim();
+    if (!trimmed) { toast.error('请输入新邮箱'); return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) { toast.error('邮箱格式不正确'); return; }
+    const currentEmail = (profile as any)?.email ?? '';
+    if (trimmed.toLowerCase() === currentEmail.toLowerCase()) {
+      toast.error('新邮箱与当前绑定邮箱相同');
+      return;
+    }
+    setChangingEmail(true);
+    const { error } = await updateEmail(trimmed);
+    setChangingEmail(false);
+    if (error) { toast.error('修改失败：' + error.message); return; }
+    await refreshProfile();
+    toast.success('邮箱已更新，如需验证请查收新邮箱中的确认邮件');
+    setEmailOpen(false);
+    setNewEmail('');
   };
 
   if (!profile) return (
@@ -206,6 +229,52 @@ export default function ProfilePage() {
             <Save className="w-4 h-4" />
             {saving ? '保存中…' : '保存修改'}
           </Button>
+
+          {/* 修改/绑定邮箱 */}
+          <Dialog open={emailOpen} onOpenChange={o => { setEmailOpen(o); if (!o) setNewEmail(''); }}>
+            <DialogTrigger asChild>
+              <Button variant="secondary" className="w-full h-11 gap-2">
+                <Mail className="w-4 h-4" />
+                {(profile as any)?.email ? '修改邮箱' : '绑定邮箱'}
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="max-w-[calc(100%-2rem)] md:max-w-sm">
+              <DialogHeader>
+                <DialogTitle>{(profile as any)?.email ? '修改绑定邮箱' : '绑定邮箱'}</DialogTitle>
+              </DialogHeader>
+              <div className="space-y-4 mt-2">
+                {(profile as any)?.email && (
+                  <div className="space-y-1.5">
+                    <Label>当前邮箱</Label>
+                    <Input value={(profile as any).email} disabled className="h-11 bg-muted text-muted-foreground" />
+                  </div>
+                )}
+                <div className="space-y-1.5">
+                  <Label htmlFor="new-email">{(profile as any)?.email ? '新邮箱' : '邮箱地址'}</Label>
+                  <div className="relative">
+                    <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+                    <Input
+                      id="new-email"
+                      name="new-email"
+                      type="email"
+                      autoComplete="email"
+                      placeholder="your@email.com"
+                      value={newEmail}
+                      onChange={e => setNewEmail(e.target.value.trim())}
+                      className="h-11 pl-9"
+                    />
+                  </div>
+                  <p className="text-xs text-muted-foreground">邮箱用于找回密码，修改后可能需要点击确认邮件生效。</p>
+                </div>
+                <div className="flex gap-2">
+                  <Button variant="secondary" className="flex-1 h-11" onClick={() => setEmailOpen(false)}>取消</Button>
+                  <Button className="flex-1 h-11" disabled={changingEmail} onClick={handleChangeEmail}>
+                    {changingEmail ? '保存中…' : '确认保存'}
+                  </Button>
+                </div>
+              </div>
+            </DialogContent>
+          </Dialog>
 
           {/* 修改密码 */}
           <Dialog open={pwdOpen} onOpenChange={o => { setPwdOpen(o); if (!o) { setCurrentPwd(''); setNewPwd(''); setConfirmPwd(''); } }}>
