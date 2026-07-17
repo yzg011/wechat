@@ -276,106 +276,91 @@ export default function ProfilePage() {
             </DialogContent>
           </Dialog>
 
-{/* 修改密码 */}
-<Dialog open={pwdOpen} onOpenChange={o => {
-  setPwdOpen(o);
-  if (!o) {
-    setCurrentPwd('');
-    setNewPwd('');
-    setConfirmPwd('');
-  }
-}}>
-  <DialogTrigger asChild>
-    <Button variant="secondary" className="w-full h-11 gap-2">
-      <KeyRound className="w-4 h-4" />
-      修改密码
-    </Button>
-  </DialogTrigger>
-  <DialogContent className="max-w-[calc(100%-2rem)] md:max-w-sm">
-    <DialogHeader>
-      <DialogTitle>修改登录密码</DialogTitle>
-    </DialogHeader>
-    {/* form包裹密码框，消除浏览器警告 */}
-    <form onSubmit={(e) => e.preventDefault()} className="space-y-4 mt-2">
-      {/* 当前密码 */}
-      <div className="space-y-1.5">
-        <Label htmlFor="pwd-current">当前密码</Label>
-        <div className="relative">
-          <Input
-            id="pwd-current"
-            type={showCurrent ? 'text' : 'password'}
-            value={currentPwd}
-            onChange={e => setCurrentPwd(e.target.value)}
-            placeholder="输入当前密码"
-            className="h-11 pr-10"
-          />
-          <button
-            type="button"
-            onClick={() => setShowCurrent(v => !v)}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-          >
-            {showCurrent ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-          </button>
-        </div>
-      </div>
-      {/* 新密码 */}
-      <div className="space-y-1.5">
-        <Label htmlFor="pwd-new">新密码</Label>
-        <div className="relative">
-          <Input
-            id="pwd-new"
-            type={showNew ? 'text' : 'password'}
-            value={newPwd}
-            onChange={e => setNewPwd(e.target.value)}
-            placeholder="至少 6 位"
-            className="h-11 pr-10"
-          />
-          <button
-            type="button"
-            onClick={() => setShowNew(v => !v)}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-          >
-            {showNew ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-          </button>
-        </div>
-      </div>
-      {/* 确认新密码 */}
-      <div className="space-y-1.5">
-        <Label htmlFor="pwd-confirm">确认新密码</Label>
-        <div className="relative">
-          <Input
-            id="pwd-confirm"
-            type={showConfirm ? 'text' : 'password'}
-            value={confirmPwd}
-            onChange={e => setConfirmPwd(e.target.value)}
-            placeholder="再次输入新密码"
-            className="h-11 pr-10"
-          />
-          <button
-            type="button"
-            onClick={() => setShowConfirm(v => !v)}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-          >
-            {showConfirm ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-          </button>
-        </div>
-      </div>
-      <Button
-        type="button"
-        className="w-full h-11"
-        disabled={changingPwd}
-        onClick={handleChangePassword}
-      >
-        {changingPwd ? '修改中…' : '确认修改'}
-      </Button>
-    </form>
-  </DialogContent>
-</Dialog>
+          {/* 修改密码 */}
+          <Dialog open={pwdOpen} onOpenChange={o => { setPwdOpen(o); if (!o) { setCurrentPwd(''); setNewPwd(''); setConfirmPwd(''); } }}>
+            <DialogTrigger asChild>
+              <Button variant="secondary" className="w-full h-11 gap-2">
+                <KeyRound className="w-4 h-4" />
+                修改密码
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="max-w-[calc(100%-2rem)] md:max-w-sm">
+              <DialogHeader><DialogTitle>修改登录密码</DialogTitle></DialogHeader>
+              <div className="space-y-4 mt-2">
+                {/* 当前密码 */}
+                <div className="space-y-1.5">
+                  <Label htmlFor="pwd-current">当前密码</Label>
+                  <div className="relative">
+                    <Input
+                      id="pwd-current"
+                      type={showCurrent ? 'text' : 'password'}
+                      value={currentPwd}
+                      onChange={e => setCurrentPwd(e.target.value)}
+                      placeholder="输入当前密码"
+                      className="h-11 pr-10"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowCurrent(v => !v)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    >
+                      {showCurrent ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+                {/* 新密码 */}
+                <div className="space-y-1.5">
+                  <Label htmlFor="pwd-new">新密码</Label>
+                  <div className="relative">
+                    <Input
+                      id="pwd-new"
+                      type={showNew ? 'text' : 'password'}
+                      value={newPwd}
+                      onChange={e => setNewPwd(e.target.value)}
+                      placeholder="至少 6 位"
+                      className="h-11 pr-10"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowNew(v => !v)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    >
+                      {showNew ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+                {/* 确认新密码 */}
+                <div className="space-y-1.5">
+                  <Label htmlFor="pwd-confirm">确认新密码</Label>
+                  <div className="relative">
+                    <Input
+                      id="pwd-confirm"
+                      type={showConfirm ? 'text' : 'password'}
+                      value={confirmPwd}
+                      onChange={e => setConfirmPwd(e.target.value)}
+                      placeholder="再次输入新密码"
+                      className="h-11 pr-10"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowConfirm(v => !v)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    >
+                      {showConfirm ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+                <Button className="w-full h-11" disabled={changingPwd} onClick={handleChangePassword}>
+                  {changingPwd ? '修改中…' : '确认修改'}
+                </Button>
+              </div>
+            </DialogContent>
+          </Dialog>
 
-<Button variant="secondary" className="w-full h-11 gap-2" onClick={handleSignOut}>
-  <LogOut className="w-4 h-4" />
-  退出登录
-</Button>
+          <Button variant="secondary" className="w-full h-11 gap-2" onClick={handleSignOut}>
+            <LogOut className="w-4 h-4" />
+            退出登录
+          </Button>
 
           {/* 黑名单管理 */}
           <Dialog open={blacklistOpen} onOpenChange={o => { setBlacklistOpen(o); if (o) loadBlockedList(); }}>
