@@ -102,7 +102,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       // Fallback：虚拟邮箱登录
-      const email = `${username}@miaoda.com`;
+      const email = `${username}@xchat.z2m.store`;
       const { error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) throw error;
       return { error: null };
@@ -113,7 +113,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signUpWithUsername = async (username: string, password: string, nickname?: string, realEmail?: string) => {
     try {
-      const email = `${username}@miaoda.com`;
+      const email = `${username}@xchat.z2m.store`;
       const { data, error } = await supabase.auth.signUp({
         email,
         password,
